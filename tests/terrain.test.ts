@@ -56,6 +56,66 @@ describe('generateWorld', () => {
   });
 });
 
+describe('the founding district', () => {
+  it('is a block of workable ground, not a river crossing', () => {
+    for (let seed = 0; seed < 24; seed++) {
+      const valley = generateWorld({ width: 96, height: 96, seed: `seed-${seed}`, parcelSize: 8, districtParcels: 2 });
+      const x0 = valley.foundingDistrict.x * 8;
+      const y0 = valley.foundingDistrict.y * 8;
+      let buildable = 0;
+      let deep = 0;
+      for (let y = y0; y < y0 + 16; y++) {
+        for (let x = x0; x < x0 + 16; x++) {
+          if (isTileBuildable(valley, x, y)) buildable++;
+          if (terrainAt(valley, x, y) === Terrain.DeepWater) deep++;
+        }
+      }
+      expect(buildable / 256, `seed ${seed} buildable`).toBeGreaterThan(0.7);
+      expect(deep / 256, `seed ${seed} deep water`).toBeLessThan(0.1);
+    }
+  });
+
+  it('puts the founding site on buildable ground inside its own district', () => {
+    for (let seed = 0; seed < 12; seed++) {
+      const valley = generateWorld({ width: 96, height: 96, seed: `d-${seed}`, parcelSize: 8, districtParcels: 2 });
+      const x0 = valley.foundingDistrict.x * 8;
+      const y0 = valley.foundingDistrict.y * 8;
+      expect(valley.foundingSite.x).toBeGreaterThanOrEqual(x0);
+      expect(valley.foundingSite.x).toBeLessThan(x0 + 16);
+      expect(valley.foundingSite.y).toBeGreaterThanOrEqual(y0);
+      expect(valley.foundingSite.y).toBeLessThan(y0 + 16);
+      expect(isTileBuildable(valley, valley.foundingSite.x, valley.foundingSite.y)).toBe(true);
+    }
+  });
+});
+
+describe('generator robustness', () => {
+  it('yields a playable valley for every seed it is given', () => {
+    for (let seed = 0; seed < 24; seed++) {
+      const valley = generateWorld({ width: 96, height: 96, seed: `seed-${seed}` });
+      let water = 0;
+      let land = 0;
+      let forest = 0;
+      for (const t of valley.terrain) {
+        if (isWater(t as Terrain)) water++;
+        else land++;
+        if (t === Terrain.Forest) forest++;
+      }
+      const total = valley.terrain.length;
+      expect(isTileBuildable(valley, valley.foundingSite.x, valley.foundingSite.y), `seed ${seed}`).toBe(true);
+      expect(water / total, `seed ${seed} water`).toBeGreaterThan(0.02);
+      expect(land / total, `seed ${seed} land`).toBeGreaterThan(0.45);
+      expect(forest / total, `seed ${seed} woodland`).toBeGreaterThan(0.03);
+      for (let i = 1; i < valley.kingsRoad.length; i++) {
+        const step =
+          Math.abs(valley.kingsRoad[i].x - valley.kingsRoad[i - 1].x) +
+          Math.abs(valley.kingsRoad[i].y - valley.kingsRoad[i - 1].y);
+        expect(step, `seed ${seed} road`).toBe(1);
+      }
+    }
+  });
+});
+
 describe('the founding site and the king’s road', () => {
   it('sits on buildable ground away from the valley edge', () => {
     const { x, y } = world.foundingSite;

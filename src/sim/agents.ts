@@ -13,7 +13,13 @@ import { getDef } from '../data/buildings';
 import type { Delivery } from './trade';
 
 /** Hard ceiling on simultaneous agents, to keep the frame budget honest. */
-export const MAX_AGENTS = 260;
+export const MAX_AGENTS = 220;
+/**
+ * Carts on the road at once. Every delivery could have one, but a city of
+ * any size makes far more deliveries than the streets can legibly show, so
+ * the traffic is a representative sample rather than a full census.
+ */
+export const MAX_CARTS = 20;
 /** Pathfinding calls allowed per simulation step. */
 export const PATH_BUDGET_PER_STEP = 8;
 /** Seconds an agent may spend stuck before it gives up and vanishes. */
@@ -72,28 +78,75 @@ function stepAgent(city: CityState, agent: Agent, dt: number): boolean {
   return true;
 }
 
+/**
+ * What an agent does once it gets where it was going. Villagers run several
+ * errands before going home, which is what keeps a steady, believable
+ * number of people on the streets rather than a trickle of one-way trips.
+ */
 function onArrival(city: CityState, agent: Agent): boolean {
   if (agent.kind === AgentKind.Guard) {
     // Guards keep walking their round for as long as the city stands.
-    const next = randomPatrolTarget(city);
-    if (!next) return false;
-    const from = { x: Math.round(agent.x), y: Math.round(agent.y) };
-    const path = findRoadPath(city, from, next, { maxNodes: 1500 });
-    if (!path) return false;
-    agent.path = path;
-    agent.step = 0;
-    agent.patience = AGENT_PATIENCE * 3;
-    return true;
+    return reroute(city, agent, randomPatrolTarget(city), AGENT_PATIENCE * 3);
   }
-  return false;
+
+  if (agent.errands <= 0) return false;
+  agent.errands -= 1;
+
+  const next = agent.errands === 0 && agent.homeBuilding !== null
+    ? doorTile(city, city.buildings.get(agent.homeBuilding) as Building)
+    : errandTarget(city, agent);
+  return reroute(city, agent, next, AGENT_PATIENCE * 2);
+}
+
+/** Send an agent off on a fresh path, or let it go if there is nowhere to go. */
+function reroute(
+  city: CityState,
+  agent: Agent,
+  target: { x: number; y: number } | null,
+  patience: number,
+): boolean {
+  if (!target) return false;
+  const from = { x: Math.round(agent.x), y: Math.round(agent.y) };
+  const path = findRoadPath(city, from, target, { maxNodes: 1600 });
+  if (!path || path.length < 2) return false;
+  agent.path = path;
+  agent.step = 0;
+  agent.patience = patience;
+  return true;
+}
+
+/** Somewhere worth walking to: a shop, a workplace, a well, a shrine. */
+function errandTarget(city: CityState, agent: Agent): { x: number; y: number } | null {
+  const options = pickBuildings(
+    city,
+    (b) =>
+      b.connected &&
+      !b.abandoned &&
+      b.id !== agent.targetBuilding &&
+      (b.kind === BuildingKind.Shop ||
+        b.kind === BuildingKind.Workshop ||
+        b.kind === BuildingKind.Service ||
+        b.kind === BuildingKind.TradeHub),
+  );
+  if (options.length === 0) return null;
+  const target = city.rng.pick(options);
+  agent.targetBuilding = target.id;
+  return doorTile(city, target);
 }
 
 /** Turn the day's deliveries into carts, up to the traffic budget. */
 export function spawnDeliveryCarts(queue: TrafficQueue, deliveries: Delivery[]): void {
-  for (const delivery of deliveries) {
-    if (delivery.from < 0) continue; // Drawn from reserves; no journey to show.
-    if (queue.pending.length > 80) break;
-    queue.pending.push(delivery);
+  // Keep the backlog short: stale deliveries would put carts on the road
+  // for journeys the city made minutes ago.
+  const room = 24 - queue.pending.length;
+  if (room <= 0) return;
+  const shown = deliveries.filter((delivery) => delivery.from >= 0);
+  if (shown.length === 0) return;
+  // Spread the sample across the day's deliveries rather than taking the
+  // first few, which would always be the same corner of the city.
+  const stride = Math.max(1, Math.floor(shown.length / room));
+  for (let i = 0; i < shown.length && queue.pending.length < 24; i += stride) {
+    queue.pending.push(shown[i]);
   }
 }
 
@@ -105,7 +158,7 @@ export function maintainAgents(city: CityState, queue: TrafficQueue): void {
   let budget = PATH_BUDGET_PER_STEP;
 
   // Carts first: they represent real economic activity.
-  while (budget > 0 && queue.pending.length > 0 && countKind(city, AgentKind.Cart) < 46) {
+  while (budget > 0 && queue.pending.length > 0 && countKind(city, AgentKind.Cart) < MAX_CARTS) {
     const delivery = queue.pending.shift() as Delivery;
     const from = city.buildings.get(delivery.from);
     const to = city.buildings.get(delivery.to);
@@ -114,7 +167,7 @@ export function maintainAgents(city: CityState, queue: TrafficQueue): void {
     spawnCart(city, from, to, delivery.good);
   }
 
-  const targetPeasants = Math.min(150, Math.floor(city.stats.population / 7));
+  const targetPeasants = Math.min(150, Math.floor(city.stats.population / 6));
   while (budget > 0 && countKind(city, AgentKind.Peasant) < targetPeasants && city.agents.length < MAX_AGENTS) {
     budget--;
     if (!spawnPeasant(city)) break;
@@ -164,6 +217,7 @@ function newAgent(city: CityState, kind: AgentKind, x: number, y: number, path: 
     homeBuilding: null,
     cargo: null,
     patience: AGENT_PATIENCE,
+    errands: 0,
   };
 }
 
@@ -211,6 +265,7 @@ function spawnPeasant(city: CityState): boolean {
   agent.homeBuilding = home.id;
   agent.targetBuilding = target.id;
   agent.patience = AGENT_PATIENCE * 2;
+  agent.errands = city.rng.int(2, 5);
   city.agents.push(agent);
   return true;
 }
@@ -268,6 +323,8 @@ function spawnTraveler(city: CityState): boolean {
   const agent = newAgent(city, AgentKind.Traveler, entry.x, entry.y, path);
   agent.targetBuilding = target.id;
   agent.patience = AGENT_PATIENCE * 3;
+  // Visitors see a sight or two before they move on.
+  agent.errands = city.rng.int(1, 3);
   city.agents.push(agent);
   return true;
 }

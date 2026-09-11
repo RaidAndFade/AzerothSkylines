@@ -22,6 +22,10 @@ export interface TerrainOptions {
   ruggedness?: number;
   /** 0 = sparse clearings, 1 = deep woodland. */
   woodland?: number;
+  /** Tiles along one edge of a land parcel. Must match the city's own. */
+  parcelSize?: number;
+  /** Parcels along one edge of the district the city starts with. */
+  districtParcels?: number;
 }
 
 export interface WorldMap {
@@ -43,6 +47,13 @@ export interface WorldMap {
   readonly oreRichness: Float32Array;
   /** Tile the founding road ends at: the heart of the new settlement. */
   readonly foundingSite: Point;
+  /**
+   * Parcel coordinates of the north-west corner of the block the city is
+   * founded on. Chosen so the whole block is workable ground.
+   */
+  readonly foundingDistrict: Point;
+  /** Size of that block, in parcels along one edge. */
+  readonly districtParcels: number;
   /** Tile where the king's road enters from outside the valley. */
   readonly roadEntry: Point;
   /** Ordered tiles of the king's road, entry first. */
@@ -88,6 +99,8 @@ export function generateWorld(options: TerrainOptions): WorldMap {
   const seedNumber = rng.serialize();
   const ruggedness = options.ruggedness ?? 0.4;
   const woodland = options.woodland ?? 0.62;
+  const parcelSize = options.parcelSize ?? 8;
+  const districtParcels = options.districtParcels ?? 2;
 
   const shapeNoise = new ValueNoise2D(rng.fork(1).serialize());
   const detailNoise = new ValueNoise2D(rng.fork(2).serialize());
@@ -231,17 +244,26 @@ export function generateWorld(options: TerrainOptions): WorldMap {
     fertility,
     oreRichness,
     foundingSite: { x: 0, y: 0 },
+    foundingDistrict: { x: 0, y: 0 },
+    districtParcels,
     roadEntry: { x: 0, y: 0 },
     kingsRoad: [],
   };
 
   // --- 6. Choose where the settlement begins and lay the king's road --------
-  const site = chooseFoundingSite(map, lake, streams, rng);
+  const district = chooseFoundingDistrict(map, parcelSize, districtParcels, lake, streams, rng);
+  const site = chooseFoundingSite(map, district, parcelSize, districtParcels);
   const entry = chooseRoadEntry(map, site);
   const road = traceKingsRoad(map, entry, site);
   levelRoadCorridor(map, road);
 
-  return { ...map, foundingSite: site, roadEntry: entry, kingsRoad: road };
+  return {
+    ...map,
+    foundingSite: site,
+    foundingDistrict: district,
+    roadEntry: entry,
+    kingsRoad: road,
+  };
 }
 
 /** Sink a broad, irregular lake into the valley floor. */
@@ -416,47 +438,133 @@ function distanceToWater(terrain: Uint8Array, width: number, height: number): Fl
 }
 
 /**
- * Score every tile for how good a town site it is — flat, buildable, well
- * watered, away from the map edge — and take the best.
+ * Choose the block of parcels the city is founded on.
+ *
+ * This is deliberately parcel-aligned rather than tile-centred: the player
+ * is given exactly this block, walls and all, so it is the block — not some
+ * window around a promising tile — that has to be good ground. Scoring a
+ * tile and claiming a block around it afterwards is how settlements end up
+ * straddling a river.
  */
-function chooseFoundingSite(map: WorldMap, lake: Point, streams: Point[][], rng: Rng): Point {
-  const { width, height } = map;
-  const margin = Math.max(10, Math.floor(Math.min(width, height) * 0.16));
-  let best: Point = { x: Math.floor(width / 2), y: Math.floor(height / 2) };
-  let bestScore = -Infinity;
-
+function chooseFoundingDistrict(
+  map: WorldMap,
+  parcelSize: number,
+  districtParcels: number,
+  lake: Point,
+  streams: Point[][],
+  rng: Rng,
+): Point {
+  const parcelsWide = Math.floor(map.width / parcelSize);
+  const parcelsHigh = Math.floor(map.height / parcelSize);
+  const span = parcelSize * districtParcels;
   const streamPoints = streams.flat();
 
-  for (let y = margin; y < height - margin; y++) {
-    for (let x = margin; x < width - margin; x++) {
-      if (!isTileBuildable(map, x, y)) continue;
+  interface Candidate {
+    origin: Point;
+    buildableFraction: number;
+    score: number;
+  }
+  const candidates: Candidate[] = [];
 
-      // Require a generous flat, dry apron for the first district.
-      let flat = 0;
+  for (let py = 0; py + districtParcels <= parcelsHigh; py++) {
+    for (let px = 0; px + districtParcels <= parcelsWide; px++) {
+      const x0 = px * parcelSize;
+      const y0 = py * parcelSize;
+
       let buildable = 0;
+      let deep = 0;
+      let elevationTotal = 0;
+      const elevationCounts = new Map<number, number>();
+      for (let y = y0; y < y0 + span; y++) {
+        for (let x = x0; x < x0 + span; x++) {
+          const i = y * map.width + x;
+          const terrain = map.terrain[i] as Terrain;
+          if (isBuildable(terrain)) buildable++;
+          if (terrain === Terrain.DeepWater) deep++;
+          const elevation = map.elevation[i];
+          elevationTotal += elevation;
+          elevationCounts.set(elevation, (elevationCounts.get(elevation) ?? 0) + 1);
+        }
+      }
+
+      const tiles = span * span;
+      const buildableFraction = buildable / tiles;
+      // Flatness: how much of the block shares its most common height.
+      let modal = 0;
+      for (const count of elevationCounts.values()) modal = Math.max(modal, count);
+      const flatFraction = modal / tiles;
+
+      // A river or lake close by is an asset; one running through the middle
+      // of the district is not.
+      const centreX = x0 + span / 2;
+      const centreY = y0 + span / 2;
+      const waterDistance = Math.min(
+        Math.hypot(centreX - lake.x, centreY - lake.y),
+        ...streamPoints.map((p) => Math.hypot(centreX - p.x, centreY - p.y)),
+      );
+      const centrality = 1 - Math.hypot(centreX / map.width - 0.5, centreY / map.height - 0.5) * 1.6;
+      const edgeMargin = Math.min(x0, y0, map.width - (x0 + span), map.height - (y0 + span));
+
+      const score =
+        buildableFraction * 320 +
+        flatFraction * 180 -
+        (deep / tiles) * 260 +
+        smoothstep(34, 8, waterDistance) * 70 +
+        centrality * 50 +
+        Math.min(edgeMargin, 12) * 3 +
+        rng.next() * 6;
+
+      candidates.push({ origin: { x: px, y: py }, buildableFraction, score });
+      void elevationTotal;
+    }
+  }
+
+  if (candidates.length === 0) return { x: 0, y: 0 };
+
+  // Insist on genuinely workable ground, relaxing only if the valley has
+  // nothing better to offer.
+  for (const minimum of [0.86, 0.78, 0.7, 0.6, 0.45, 0]) {
+    const viable = candidates.filter((c) => c.buildableFraction >= minimum);
+    if (viable.length === 0) continue;
+    viable.sort((a, b) => b.score - a.score);
+    return viable[0].origin;
+  }
+  return candidates[0].origin;
+}
+
+/**
+ * The tile inside the founding district that the king's road runs to: open,
+ * level ground with as much buildable land around it as possible.
+ */
+function chooseFoundingSite(
+  map: WorldMap,
+  district: Point,
+  parcelSize: number,
+  districtParcels: number,
+): Point {
+  const x0 = district.x * parcelSize;
+  const y0 = district.y * parcelSize;
+  const span = parcelSize * districtParcels;
+  const centreX = x0 + span / 2;
+  const centreY = y0 + span / 2;
+
+  let best: Point = { x: Math.floor(centreX), y: Math.floor(centreY) };
+  let bestScore = -Infinity;
+
+  for (let y = y0 + 1; y < y0 + span - 1; y++) {
+    for (let x = x0 + 1; x < x0 + span - 1; x++) {
+      if (!isTileBuildable(map, x, y)) continue;
       const here = elevationAt(map, x, y);
-      for (let dy = -4; dy <= 4; dy++) {
-        for (let dx = -4; dx <= 4; dx++) {
-          if (!inBounds(map, x + dx, y + dy)) continue;
-          if (isTileBuildable(map, x + dx, y + dy)) buildable++;
+      let open = 0;
+      let flat = 0;
+      for (let dy = -3; dy <= 3; dy++) {
+        for (let dx = -3; dx <= 3; dx++) {
+          if (isTileBuildable(map, x + dx, y + dy)) open++;
           if (Math.abs(elevationAt(map, x + dx, y + dy) - here) <= 1) flat++;
         }
       }
-      if (buildable < 60) continue;
-
-      const waterDist = Math.min(
-        Math.hypot(x - lake.x, y - lake.y),
-        ...streamPoints.map((p) => Math.hypot(x - p.x, y - p.y)),
-      );
-      const centreBias = 1 - Math.hypot(x / width - 0.5, y / height - 0.5) * 1.4;
-      const score =
-        flat * 1.6 +
-        buildable * 1.0 +
-        smoothstep(26, 5, waterDist) * 60 -
-        Math.max(0, 6 - waterDist) * 14 +
-        centreBias * 40 +
-        rng.next() * 4;
-
+      const toCentre = Math.hypot(x - centreX, y - centreY);
+      const score = open * 2.5 + flat * 1.5 - toCentre * 2.2;
       if (score > bestScore) {
         bestScore = score;
         best = { x, y };
@@ -641,7 +749,8 @@ export function treesOnTile(
       ox: (a - 0.5) * 0.78,
       oy: (b - 0.5) * 0.78,
       scale: 0.78 + c * 0.45,
-      variant: Math.floor(c * 4) % 4,
+      // Elwynn is overwhelmingly green; a turning maple is the rare one.
+      variant: c < 0.44 ? 0 : c < 0.7 ? 1 : c < 0.88 ? 2 : 3,
     });
   }
   return trees;

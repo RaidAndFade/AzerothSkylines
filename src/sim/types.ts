@@ -258,6 +258,8 @@ export interface Agent {
   cargo: { good: Good; amount: number } | null;
   /** Seconds before the agent despawns if it cannot progress. */
   patience: number;
+  /** Journeys still to make before the agent goes home and vanishes. */
+  errands: number;
 }
 
 export enum AgentKind {

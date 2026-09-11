@@ -24,6 +24,8 @@ import { getDef } from '../data/buildings';
 
 /** Tiles along one edge of a land parcel. */
 export const PARCEL_SIZE = 8;
+/** Parcels along one edge of the district the city is founded on. */
+export const FOUNDING_DISTRICT_PARCELS = 2;
 /** Base price of the first ring of land outside the founding district. */
 export const PARCEL_BASE_PRICE = 420;
 /** Gold per tile of curtain wall raised. */
@@ -118,7 +120,13 @@ export function createCity(options: CityOptions = {}): CityState {
   const width = options.width ?? 112;
   const height = options.height ?? 112;
   const seed = options.seed ?? Math.floor(Math.random() * 0xffffffff);
-  const map = generateWorld({ width, height, seed });
+  const map = generateWorld({
+    width,
+    height,
+    seed,
+    parcelSize: PARCEL_SIZE,
+    districtParcels: FOUNDING_DISTRICT_PARCELS,
+  });
   const rng = new Rng(map.seed ^ 0x2f6e2b1);
   const size = width * height;
 
@@ -254,11 +262,11 @@ export function logEvent(
 // --- parcels ----------------------------------------------------------------
 
 function initParcels(city: CityState): void {
-  const founding = parcelCoordOf(city.map.foundingSite.x, city.map.foundingSite.y);
+  const founding = city.map.foundingDistrict;
   let id = 0;
   for (let py = 0; py < city.parcelsHigh; py++) {
     for (let px = 0; px < city.parcelsWide; px++) {
-      const distance = Math.max(Math.abs(px - founding.px), Math.abs(py - founding.py));
+      const distance = Math.max(Math.abs(px - founding.x), Math.abs(py - founding.y));
       city.parcels.push({
         id: id++,
         px,
@@ -298,7 +306,7 @@ function parcelIsSettleable(city: CityState, px: number, py: number): boolean {
       if (isTileBuildable(city.map, x, y)) buildable++;
     }
   }
-  return buildable >= PARCEL_SIZE * PARCEL_SIZE * 0.32;
+  return buildable >= PARCEL_SIZE * PARCEL_SIZE * 0.5;
 }
 
 /** Parcels that touch an owned parcel and can therefore be annexed next. */
@@ -317,21 +325,16 @@ export function purchasableParcels(city: CityState): Parcel[] {
   return out;
 }
 
-/** The founding district: the parcel block around the end of the king's road. */
+/**
+ * Claim the parcel block the generator chose. It is already known to be
+ * workable ground, so this simply takes it.
+ */
 function claimFoundingDistrict(city: CityState): void {
-  const site = city.map.foundingSite;
-  const { px, py } = parcelCoordOf(site.x, site.y);
-  // Claim a 2x2 block, biased so the road entry side is included.
-  const entry = city.map.roadEntry;
-  const dx = entry.x > site.x ? 0 : -1;
-  const dy = entry.y > site.y ? 0 : -1;
-  for (let oy = 0; oy <= 1; oy++) {
-    for (let ox = 0; ox <= 1; ox++) {
-      const parcel = parcelAt(city, px + dx + ox, py + dy + oy);
-      if (parcel) {
-        parcel.owned = true;
-        parcel.settleable = true;
-      }
+  const { x: px, y: py } = city.map.foundingDistrict;
+  for (let oy = 0; oy < city.map.districtParcels; oy++) {
+    for (let ox = 0; ox < city.map.districtParcels; ox++) {
+      const parcel = parcelAt(city, px + ox, py + oy);
+      if (parcel) parcel.owned = true;
     }
   }
   city.wallsDirty = true;

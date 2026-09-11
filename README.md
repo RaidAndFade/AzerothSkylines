@@ -1,0 +1,153 @@
+# Azeroth Skylines
+
+A city builder in the spirit of *Cities: Skylines*, set in Elwynn Forest and
+built in the visual language of Stormwind. A road runs into the valley and
+stops; everything else is yours to lay out.
+
+The whole game — code, artwork, interface — compiles to a **single shareable
+`index.html` file** with no external assets, no network calls and no
+dependencies at runtime. Open it from a phone, a laptop or a USB stick and
+it works.
+
+![The valley](docs/screenshot-valley.png)
+
+## Playing
+
+Open `dist/index.html` in a browser.
+
+| | |
+|---|---|
+| **Move the map** | One finger drag (or the mouse) while Inspect is selected; two fingers any time |
+| **Zoom** | Pinch, or the scroll wheel |
+| **Draw a street** | Pick **Roads**, then drag. Streets are laid in an L from where the drag began |
+| **Zone land** | Pick **Dwellings**, **Trade** or **Crafting**, then drag a rectangle beside a road |
+| **Build** | Pick **Build**, choose from the catalogue, then tap a plot fronting a road |
+| **Annex land** | Pick **Land**, tap a lot beyond the walls, and confirm the price |
+| **Clear ground** | Pick **Raze** and drag over what you want gone |
+| **Keyboard** | `WASD` scroll · `1`–`4` speed · `R` roads · `Z` zone · `X` raze · `Esc` put the tool down |
+
+Your city is saved to the browser on this device every ninety game-days, and
+from the menu.
+
+### Getting started
+
+1. Lay a street off the king's road where it enters your walls.
+2. Zone dwellings along it. Buildings only grow on zoned land that fronts a
+   street, so leave no plot more than one tile from the cobbles.
+3. Sink a **Village Well** and dig a **Cesspit** — water and drainage run
+   beneath the streets, so both reach any building whose door is on a road.
+4. Zone for **Trade** so there is somewhere to buy bread, and **Crafting**
+   so there is somewhere to work. Keep the forges downwind of the houses.
+5. When the district fills, use **Land** to buy the next lot. The curtain
+   wall moves out to enclose it; you pay for the land and the new masonry.
+
+## How it works
+
+### The valley
+
+Terrain is generated from the name you give your valley, so the same name
+always grows the same valley. Rolling hardwood country sits below northern
+foothills; a lake is sunk into the valley floor and two or three streams are
+walked down to it, cutting their beds as they go. The ground is then
+classified by height and moisture into water, sand, grass, meadow, woodland,
+rock and snow, and quantised into eight elevation steps.
+
+The founding district is chosen **before** the town site: every possible
+block of parcels is scored on how much of it is workable, level ground, and
+the best one is claimed whole. (Choosing a promising tile first and claiming
+land around it afterwards is how settlements end up straddling a river.) The
+king's road is then A\*-routed in from the valley edge, preferring flat, dry,
+open ground, and a level corridor is cut and filled along it.
+
+### The city
+
+| System | What it does |
+|---|---|
+| `sim/roads` | Placement rules, bridges, slope limits, auto-tiling connectivity, A\* pathfinding |
+| `sim/zoning` | Painting districts; street-frontage rules |
+| `sim/growth` | Growth ladders, upgrades and decline. Industry picks farming, timber, mining or crafting from the land around the plot |
+| `sim/utilities` | Water and drainage pushed along the road network under capacity limits |
+| `sim/services` | Radius coverage for the guard, the Light, merriment and commerce; pollution and land value |
+| `sim/trade` | Production, haulage between buildings, hub reserves, import and export |
+| `sim/population` | Who lives where, who works where, and how content they are |
+| `sim/demand` | The three demand bars, driven by contentment, vacancies and unfilled posts |
+| `sim/economy` | Monthly taxes and upkeep |
+| `sim/walls` | The curtain wall, derived from the land you hold |
+| `sim/agents` | Villagers, carts, guards and travellers |
+
+Every system is a plain function over plain state, which is why the whole
+simulation can be tested without a browser.
+
+### The artwork
+
+There are no image files. Every building, tree, road tile, wall piece and
+villager is drawn with the Canvas 2D API into an offscreen sprite the first
+time it is needed, then blitted. Buildings are composed from a small set of
+isometric primitives — boxes, hipped and gabled roofs, cones, cylinders —
+driven by a table of styles, which is what keeps forty-odd structures
+looking like one city rather than forty separate drawings.
+
+Ground is painted as batched isometric diamonds: tiles are bucketed by class
+and shade and each bucket filled in a single path, so a full screen of
+Elwynn costs a few dozen draw calls while every tile still gets its own
+slight variation in colour.
+
+## Building it
+
+```bash
+npm install
+npm run build      # -> dist/index.html, one self-contained file
+npm run dev        # dev server on :8080 with live reload
+npm test           # the simulation test suite
+npm run typecheck  # strict TypeScript, no emit
+npm run sheet      # -> dist/sheet.html, a contact sheet of every sprite
+```
+
+`npm run sheet` is a development aid: it renders the whole sprite catalogue
+on one page so the artwork can be reviewed side by side.
+
+### Tests
+
+251 tests cover each simulation system, plus two end-to-end runs: one that
+lays out a town, gives it water, drainage and a guard, and checks it grows
+past five hundred residents, employs them, supplies its shops and pays its
+own way; and one that neglects a town and checks it empties out.
+
+```
+npm test
+npm run coverage
+```
+
+### Poking at a running city
+
+A published page exposes a small read-mostly handle for the browser console:
+
+```js
+azerothSkylines.city            // live city state
+azerothSkylines.camera          // the camera
+azerothSkylines.screenForTile(x, y)
+```
+
+Nothing in the game depends on it; it exists for debugging and for the
+automated interface tests in `tools/`.
+
+## Lore notes
+
+The content follows Elwynn Forest and Stormwind as closely as a city builder
+can. Dwellings climb from wattle-and-daub crofters' huts through Goldshire
+half-timber to white granite under the blue slate of the capital. Industry
+follows the valley's real trades: farmsteads and vineyards, the Eastvale
+logging camps, the Fargodeep and Jasperlode delves, and the forges of the
+Dwarven District. Services are the Stormwind City Guard, the Cathedral of
+Light, the Lion's Pride Inn and the canals that bisect the city. Trade with
+the world runs through markets, caravan posts for the road to Goldshire and
+Westfall, and deep-water docks.
+
+Sources consulted for the setting:
+[Elwynn Forest](https://warcraft.wiki.gg/wiki/Elwynn_Forest) ·
+[Stormwind City](https://warcraft.wiki.gg/wiki/Stormwind_City)
+
+## Licence
+
+MIT. Warcraft, Azeroth, Stormwind and Elwynn Forest are trademarks of
+Blizzard Entertainment; this is an unaffiliated fan project.
