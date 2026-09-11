@@ -9,13 +9,13 @@
 import { ELEVATION_STEP, HALF_HEIGHT, HALF_WIDTH, depthOf } from './iso';
 import { PALETTE, mix, withAlpha } from './palette';
 import { Camera } from './camera';
-import { DETAIL_ZOOM, TileRange, ViewRect, drawTerrain, strokeTile, strokeTileRect } from './terrainLayer';
+import { DETAIL_ZOOM, FLORA_ZOOM, TileRange, ViewRect, drawTerrain, strokeTile, strokeTileRect } from './terrainLayer';
+import { GroundField, buildGroundField } from './groundTexture';
 import { getBuildingSprite } from './buildingSprites';
-import { Sprite, getAgentSprite, getRoadSprite, getTreeSprite, getWallSprite } from './propSprites';
+import { Sprite, getAgentSprite, getPropSprite, getTreeSprite, getWallSprite } from './propSprites';
 import { AgentKind, Building, RoadType, Service, Terrain, Zone, isWater } from '../sim/types';
 import { CityState, PARCEL_SIZE, tileIndex } from '../sim/city';
-import { treesOnTile } from '../sim/terrain';
-import { roadConnectionMask } from '../sim/roads';
+import { propsOnTile, treesOnTile } from '../sim/terrain';
 import { getDef } from '../data/buildings';
 
 export type Overlay =
@@ -66,7 +66,7 @@ interface DrawItem {
   x: number;
   y: number;
   sprite: Sprite;
-  /** Trees are drawn at a per-tree scale; everything else at 1. */
+  /** Trees and ground clutter carry their own scale; everything else 1. */
   scale: number;
   /** Set for buildings, so the selection outline and warning draw with it. */
   building: Building | null;
@@ -92,20 +92,20 @@ export function buildingDepth(
 }
 
 /**
- * Depth a tree sorts at, including the sub-tile offset that decides where it
- * is actually standing.
+ * Depth a tree or a tuft of ground clutter sorts at, including the sub-tile
+ * offset that decides where it is actually standing.
  *
  * The offset is given in screen pixels; inverting the projection turns it
- * back into a tile position. Only the north-south part moves a tree in
- * depth — nudging one east or west slides it along its own diagonal.
+ * back into a tile position. Only the north-south part moves something in
+ * depth — nudging it east or west slides it along its own diagonal.
  */
-export function treeDepth(
+export function scatterDepth(
   x: number,
   y: number,
-  tree: { ox: number; oy: number },
+  scatter: { ox: number; oy: number },
   elevation: number,
 ): number {
-  return depthOf(x + (tree.oy + tree.ox) / 2, y + (tree.oy - tree.ox) / 2, elevation);
+  return depthOf(x + (scatter.oy + scatter.ox) / 2, y + (scatter.oy - scatter.ox) / 2, elevation);
 }
 
 /**
@@ -141,6 +141,9 @@ export class Renderer {
   private pixelRatio = 1;
   /** Rebuilt only on resize; creating it per frame was pure waste. */
   private sky: CanvasGradient | null = null;
+  /** The baked ground colour field, rebuilt only when the valley changes. */
+  private ground: GroundField | null = null;
+  private groundSeed = Number.NaN;
   /** Frame time in milliseconds, smoothed, for the debug readout. */
   frameTime = 0;
   /** This frame's sprites, rebuilt each frame and sorted by depth. */
@@ -179,7 +182,7 @@ export class Renderer {
     // allocated a fresh rectangle.
     const view = this.camera.visibleWorldRect();
     const range = this.camera.visibleTileRect(city.width, city.height);
-    drawTerrain(ctx, city, view, range, {
+    drawTerrain(ctx, city, this.groundField(city), view, range, {
       time: options.time,
       showZones: options.showZones,
       zoom: this.camera.zoom,
@@ -195,6 +198,15 @@ export class Renderer {
 
     const elapsed = performance.now() - started;
     this.frameTime = this.frameTime * 0.9 + elapsed * 0.1;
+  }
+
+  /** The colour field for this valley, baked on first sight. */
+  private groundField(city: CityState): GroundField {
+    if (!this.ground || this.groundSeed !== city.map.seed) {
+      this.ground = buildGroundField(city);
+      this.groundSeed = city.map.seed;
+    }
+    return this.ground;
   }
 
   private drawSky(): void {
@@ -243,20 +255,12 @@ export class Renderer {
         if (cx + 90 < view.left || cx - 90 > view.right) continue;
         if (cy + 90 < view.top || cy - 200 > view.bottom) continue;
 
-        const tileDepth = depthOf(x, y, step);
-
-        // Streets.
-        const road = city.roads[index] as RoadType;
-        if (road !== RoadType.None) {
-          this.push(tileDepth, cx, cy, getRoadSprite(road, roadConnectionMask(city, x, y)), 1, null);
-        }
-
         // The curtain wall.
         const wallIndex = city.wallAt[index];
         if (wallIndex >= 0) {
           const segment = city.walls[wallIndex];
           this.push(
-            tileDepth,
+            depthOf(x, y, step),
             cx,
             cy,
             getWallSprite(segment.kind, segment.connections, segment.orientation),
@@ -274,13 +278,25 @@ export class Renderer {
             const sprite = getBuildingSprite(building.defId, building.variant, building.facing, building.abandoned);
             this.push(buildingDepth(building, step), cx, cy, sprite, 1, building);
           }
-        } else if (drawDetail && road === RoadType.None && wallIndex < 0) {
-          // Woodland, but only where nothing has been built. A tree nudged
-          // toward a corner of its tile sorts from where it actually stands
-          // — see `treeDepth`.
+        } else if (drawDetail && city.roads[index] === RoadType.None && wallIndex < 0) {
+          // Stones, flowers and tufts, and whatever grows over them. Each
+          // sorts from where it actually stands within the tile rather than
+          // from the tile's centre — see `scatterDepth`.
+          if (zoom >= FLORA_ZOOM) {
+            for (const prop of propsOnTile(city.map, x, y)) {
+              this.push(
+                scatterDepth(x, y, prop, step),
+                cx + prop.ox * HALF_WIDTH,
+                cy + prop.oy * HALF_HEIGHT,
+                getPropSprite(prop.variant),
+                prop.scale,
+                null,
+              );
+            }
+          }
           for (const tree of treesOnTile(city.map, x, y)) {
             this.push(
-              treeDepth(x, y, tree, step),
+              scatterDepth(x, y, tree, step),
               cx + tree.ox * HALF_WIDTH,
               cy + tree.oy * HALF_HEIGHT,
               getTreeSprite(tree.variant),

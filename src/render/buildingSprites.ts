@@ -8,12 +8,14 @@
  */
 import { HALF_HEIGHT, HALF_WIDTH } from './iso';
 import { PALETTE, ROOF_SETS, RoofSet, mix, shade, withAlpha } from './palette';
+import { MaterialName, paintFace } from './materials';
+import { light } from './light';
 import {
   OUTLINE,
   Point,
+  Skin,
   banner,
-  insetFootprint,
-  boxColors,
+  castShadow,
   coneRoof,
   cylinder,
   expand,
@@ -22,11 +24,13 @@ import {
   gableRoof,
   groundShadow,
   hipRoof,
+  insetFootprint,
   isoBox,
   lerpPoint,
   midpoint,
   polygon,
   raise,
+  strokeSilhouette,
   windowRow,
 } from './shapes';
 import { hash2 } from '../core/rng';
@@ -70,6 +74,8 @@ export type Feature =
 
 export interface BuildingStyle {
   wall: string;
+  /** Overrides the material inferred from the wall colour. */
+  wallMaterial?: MaterialName;
   /** Exposed timber framing, drawn over the plaster. */
   timbered?: boolean;
   roof: RoofSet;
@@ -162,6 +168,47 @@ const DEFAULT_STYLE: BuildingStyle = {
   features: [],
 };
 
+/** What each roof set is actually made of. */
+const ROOF_MATERIAL: Record<RoofSet, MaterialName> = {
+  blue: 'slate',
+  red: 'slate',
+  violet: 'slate',
+  green: 'shingle',
+  thatch: 'thatch',
+  stone: 'whitestone',
+};
+
+/** The material a wall is built from, inferred from its colour. */
+function wallMaterialOf(style: BuildingStyle): MaterialName {
+  if (style.wallMaterial) return style.wallMaterial;
+  switch (style.wall) {
+    case WHITE_STONE:
+      return 'whitestone';
+    case STONE:
+    case PALETTE.stoneMid:
+    case PALETTE.stoneDark:
+      return 'granite';
+    case PLASTER:
+      return 'plaster';
+    case PALETTE.timber:
+    case PALETTE.timberLight:
+      return 'plank';
+    case PALETTE.grass:
+      return 'plain';
+    default:
+      return 'plaster';
+  }
+}
+
+/**
+ * Shift a material's colour a little per variant: no two thatched roofs in
+ * a village have weathered to quite the same straw.
+ */
+function weather(base: string, variant: number, amount: number): string {
+  const drift = ((variant * 2654435761) % 1000) / 1000 - 0.5;
+  return mix(base, drift > 0 ? '#FFF2CE' : '#4A4032', Math.abs(drift) * 2 * amount);
+}
+
 const PADDING = 14;
 /**
  * How far a building is set back from the edge of its lot, in pixels across
@@ -179,16 +226,20 @@ export function clearSpriteCache(): void {
  * Fetch (and, on first use, draw) the sprite for a building.
  * `abandoned` swaps in the derelict treatment.
  */
+/** Distinct drawings kept per definition. Each is a few kilobytes. */
+export const VARIANT_COUNT = 6;
+
 export function getBuildingSprite(
   defId: string,
   variant: number,
   facing: number,
   abandoned = false,
 ): Sprite {
-  const key = `${defId}|${variant % 4}|${facing % 4}|${abandoned ? 'r' : 'w'}`;
+  const index = variant % VARIANT_COUNT;
+  const key = `${defId}|${index}|${facing % 4}|${abandoned ? 'r' : 'w'}`;
   const existing = cache.get(key);
   if (existing) return existing;
-  const sprite = drawBuilding(defId, variant % 4, facing % 4, abandoned);
+  const sprite = drawBuilding(defId, index, facing % 4, abandoned);
   cache.set(key, sprite);
   return sprite;
 }
@@ -198,9 +249,9 @@ function drawBuilding(defId: string, variant: number, facing: number, abandoned:
   const style = BUILDING_STYLES[defId] ?? DEFAULT_STYLE;
   const roof = ROOF_SETS[style.roof];
 
-  // Variants nudge the proportions so a street of the same house type does
-  // not read as a row of clones.
-  const jitter = 0.9 + (variant / 4) * 0.22;
+  // Variants nudge the proportions, turn the ridge and weather the roof, so
+  // a street of the same house type does not read as a row of clones.
+  const jitter = 0.88 + (variant / VARIANT_COUNT) * 0.26;
   const wallHeight = Math.round(style.wallHeight * jitter);
   const roofHeight = Math.round(style.roofHeight * jitter);
   const extra = style.features.includes('spire') ? roofHeight * 1.6 : style.features.includes('headframe') ? 46 : 18;
@@ -232,7 +283,28 @@ function drawBuilding(defId: string, variant: number, facing: number, abandoned:
   if (style.features.includes('pier')) drawPier(ctx, lot);
   if (style.features.includes('lists')) drawArena(ctx, lot);
 
-  const context: DrawContext = { ctx, corners, centre, style, roof, wallHeight, roofHeight, variant, facing, def };
+  const context: DrawContext = {
+    ctx,
+    corners,
+    centre,
+    style,
+    roof,
+    roofSkin: {
+      material: ROOF_MATERIAL[style.roof],
+      color: weather(roof.main, variant, 0.14),
+      seed: variant * 17 + 3,
+    },
+    wallSkin: {
+      material: wallMaterialOf(style),
+      color: weather(style.wall, variant + 2, 0.07),
+      seed: variant * 11,
+    },
+    wallHeight,
+    roofHeight,
+    variant,
+    facing,
+    def,
+  };
 
   if (style.roofShape === 'none') {
     drawGroundOnlyBuilding(context);
@@ -254,6 +326,10 @@ interface DrawContext {
   centre: Point;
   style: BuildingStyle;
   roof: { main: string; light: string; dark: string };
+  /** What the roof is made of, ready to hand to a shape. */
+  roofSkin: Skin;
+  /** What the walls are made of. */
+  wallSkin: Skin;
   wallHeight: number;
   roofHeight: number;
   variant: number;
@@ -263,16 +339,23 @@ interface DrawContext {
 
 /** Walls, roof, timber framing and windows: the body of a building. */
 function drawMainMass(context: DrawContext): void {
-  const { ctx, corners, style, roof, wallHeight, roofHeight, facing, def } = context;
+  const { ctx, corners, style, roofSkin, wallSkin, wallHeight, roofHeight, facing, def, variant } = context;
+
+  // The shadow the whole mass throws, laid down before anything is built.
+  castShadow(ctx, corners, wallHeight + roofHeight * 0.6, 0.18);
 
   // Grander buildings sit on a plinth, which reads as weight.
   const plinth = wallHeight > 34 ? 5 : 0;
   let base = corners;
   if (plinth > 0) {
-    base = isoBox(ctx, expand(corners, 2), plinth, boxColors(PALETTE.stoneMid));
+    base = isoBox(ctx, expand(corners, 2), plinth, {
+      material: 'granite',
+      color: PALETTE.stoneMid,
+      seed: variant,
+    });
   }
 
-  const top = isoBox(ctx, base, wallHeight, boxColors(style.wall));
+  const top = isoBox(ctx, base, wallHeight, wallSkin);
 
   if (style.timbered) drawTimberFraming(ctx, base, wallHeight);
   if (style.windows) {
@@ -283,18 +366,25 @@ function drawMainMass(context: DrawContext): void {
 
   switch (style.roofShape) {
     case 'hip':
-      hipRoof(ctx, top, roofHeight, roof, 5);
+      hipRoof(ctx, top, roofHeight, roofSkin, 5);
       break;
     case 'cone': {
       const centre = { x: (top[1].x + top[3].x) / 2, y: (top[0].y + top[2].y) / 2 };
-      coneRoof(ctx, centre, (def.width + def.height) * HALF_WIDTH * 0.36, HALF_HEIGHT * 0.6, roofHeight, roof);
+      coneRoof(ctx, centre, (def.width + def.height) * HALF_WIDTH * 0.36, HALF_HEIGHT * 0.6, roofHeight, roofSkin);
       break;
     }
     case 'flat':
-      drawFlatRoof(ctx, top, roof);
+      drawFlatRoof(ctx, top, roofSkin);
       break;
     default:
-      gableRoof(ctx, top, roofHeight, roof, def.width >= def.height ? 0 : 1, def.width * def.height > 1 ? 5 : 3);
+      gableRoof(
+        ctx,
+        top,
+        roofHeight,
+        roofSkin,
+        def.width === def.height ? ((variant % 2) as 0 | 1) : def.width > def.height ? 0 : 1,
+        def.width * def.height > 1 ? 5 : 3,
+      );
       break;
   }
 }
@@ -305,14 +395,10 @@ function drawGroundOnlyBuilding(context: DrawContext): void {
   fillFace(ctx, corners, withAlpha(PALETTE.dirt, 0.35), false);
 }
 
-function drawFlatRoof(
-  ctx: CanvasRenderingContext2D,
-  top: Point[],
-  roof: { main: string; light: string; dark: string },
-): void {
+function drawFlatRoof(ctx: CanvasRenderingContext2D, top: Point[], skin: Skin): void {
   const eaves = expand(top, 4);
-  fillFace(ctx, eaves, roof.main);
-  fillFace(ctx, expand(top, 1), shade(roof.light, 0.05), false);
+  paintFace(ctx, eaves, skin.material, skin.color, { surface: 'top', seed: skin.seed, occlude: false });
+  strokeSilhouette(ctx, eaves);
 }
 
 /** The dark exposed beams of a Goldshire half-timbered wall. */
@@ -451,7 +537,11 @@ function drawChimney(context: DrawContext, width: number, color: string, smoking
   // The stack emerges partway up the roof slope and clears the ridge a little.
   const base = anchor.y - wallHeight - roofHeight * 0.25;
   const stackTop = anchor.y - wallHeight - roofHeight * (smoking ? 1.9 : 1.15);
-  const colors = boxColors(color);
+  const colors = {
+    left: light(color, 'left'),
+    right: light(color, 'right'),
+    top: light(color, 'top'),
+  };
   const half = width / 2;
   const skew = width * 0.3;
 
@@ -486,11 +576,13 @@ function drawChimney(context: DrawContext, width: number, color: string, smoking
 }
 
 function drawBanners(context: DrawContext): void {
-  const { ctx, corners, wallHeight } = context;
+  const { ctx, corners, wallHeight, def } = context;
+  // One banner per visible wall on a modest building; a pair on a grand one.
+  const spots = def.width * def.height > 1 ? [0.26, 0.74] : [0.5];
   for (const [a, b] of [[corners[3], corners[2]], [corners[1], corners[2]]]) {
-    for (const t of [0.28, 0.72]) {
+    for (const t of spots) {
       const point = lerpPoint(a, b, t);
-      banner(ctx, { x: point.x, y: point.y - wallHeight * 0.92 }, 7, 15, PALETTE.alliance, PALETTE.gold);
+      banner(ctx, { x: point.x, y: point.y - wallHeight * 0.9 }, 7, 15, PALETTE.alliance, PALETTE.gold);
     }
   }
 }
@@ -706,8 +798,16 @@ function drawSpire(context: DrawContext): void {
   const towerHeight = wallHeight * 1.25;
   const radius = 9;
 
-  const top = cylinder(ctx, { x: anchor.x, y: baseY }, radius, radius * 0.5, towerHeight, style.wall);
-  coneRoof(ctx, top, radius + 2, radius * 0.55, roofHeight * 1.5, roof);
+  const top = cylinder(ctx, { x: anchor.x, y: baseY }, radius, radius * 0.5, towerHeight, {
+    material: 'whitestone',
+    color: style.wall,
+    seed: context.variant,
+  });
+  coneRoof(ctx, top, radius + 2, radius * 0.55, roofHeight * 1.5, {
+    material: ROOF_MATERIAL[style.roof],
+    color: roof.main,
+    seed: context.variant,
+  });
 
   // A pennant on the finial.
   ctx.strokeStyle = PALETTE.stoneDark;
@@ -725,19 +825,60 @@ function drawSpire(context: DrawContext): void {
   ctx.fill();
 }
 
+/**
+ * A crenellated parapet round the wall head. It only belongs where the roof
+ * does not overhang it; on a pitched roof the merlons would poke out from
+ * under the eaves, so those buildings get a plain string course instead.
+ */
 function drawCrenellations(context: DrawContext): void {
-  const { ctx, corners, wallHeight, style } = context;
+  const { ctx, corners, wallHeight, style, wallSkin, variant } = context;
   const top = raise(corners, wallHeight);
-  ctx.fillStyle = shade(style.wall, 0.05);
-  ctx.strokeStyle = OUTLINE;
-  ctx.lineWidth = 1;
+  const pitched = style.roofShape === 'gable' || style.roofShape === 'hip';
+
+  if (pitched) {
+    // A moulded band under the eaves: martial, but out of the roof's way.
+    for (const [a, b] of [[top[3], top[2]], [top[1], top[2]]]) {
+      ctx.strokeStyle = withAlpha(PALETTE.stoneMid, 0.85);
+      ctx.lineWidth = 2.4;
+      ctx.beginPath();
+      ctx.moveTo(a.x, a.y + 3);
+      ctx.lineTo(b.x, b.y + 3);
+      ctx.stroke();
+      ctx.strokeStyle = withAlpha('#FFF6E0', 0.3);
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(a.x, a.y + 1.6);
+      ctx.lineTo(b.x, b.y + 1.6);
+      ctx.stroke();
+    }
+    return;
+  }
+
   for (const [a, b] of [[top[3], top[2]], [top[1], top[2]]]) {
     const merlons = 4;
     for (let i = 0; i < merlons; i++) {
-      const point = lerpPoint(a, b, (i + 0.5) / merlons);
+      const centre = (i + 0.5) / merlons;
+      const from = lerpPoint(a, b, Math.max(0, centre - 0.13));
+      const to = lerpPoint(a, b, Math.min(1, centre + 0.13));
+      const height = 7;
+      paintFace(
+        ctx,
+        [
+          { x: from.x, y: from.y - height },
+          { x: to.x, y: to.y - height },
+          { x: to.x, y: to.y },
+          { x: from.x, y: from.y },
+        ],
+        wallSkin.material,
+        wallSkin.color,
+        { surface: a === top[3] ? 'left' : 'right', seed: variant + i, occlude: false },
+      );
+      ctx.strokeStyle = OUTLINE;
+      ctx.lineWidth = 0.9;
       ctx.beginPath();
-      ctx.rect(point.x - 3, point.y - 6, 6, 6);
-      ctx.fill();
+      ctx.moveTo(from.x, from.y - height);
+      ctx.lineTo(to.x, to.y - height);
+      ctx.lineTo(to.x, to.y);
       ctx.stroke();
     }
   }
@@ -796,7 +937,11 @@ function drawStalls(context: DrawContext): void {
 
 function drawWell(context: DrawContext): void {
   const { ctx, centre, style } = context;
-  const top = cylinder(ctx, { x: centre.x, y: centre.y + 4 }, 12, 6, 11, style.wall);
+  const top = cylinder(ctx, { x: centre.x, y: centre.y + 4 }, 12, 6, 11, {
+    material: 'granite',
+    color: style.wall,
+    seed: context.variant,
+  });
 
   ctx.beginPath();
   ctx.ellipse(top.x, top.y, 8, 4, 0, 0, Math.PI * 2);
@@ -836,7 +981,7 @@ function drawFountain(context: DrawContext): void {
   ctx.fill();
 
   // A lion on a plinth, spilling water.
-  cylinder(ctx, { x: centre.x, y: centre.y }, 5, 2.5, 12, PALETTE.stone);
+  cylinder(ctx, { x: centre.x, y: centre.y }, 5, 2.5, 12, { material: 'whitestone', color: PALETTE.stone });
   ctx.beginPath();
   ctx.ellipse(centre.x, centre.y - 15, 5, 6, 0, 0, Math.PI * 2);
   ctx.fillStyle = PALETTE.gold;
@@ -989,9 +1134,9 @@ function drawPavilions(context: DrawContext): void {
     ], PALETTE.parchment);
     // Striped conical roof.
     coneRoof(ctx, { x: spot.x, y: spot.y - height * 0.45 }, radius + 2, 4, height * 0.6, {
-      main: color,
-      light: mix(color, '#FFFFFF', 0.3),
-      dark: mix(color, '#000000', 0.3),
+      material: 'canvas',
+      color,
+      seed: index * 5,
     });
     // A pennant on the pole.
     ctx.fillStyle = PALETTE.gold;

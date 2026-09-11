@@ -2,8 +2,8 @@
  * The treasury: taxes in, upkeep out, settled once a month.
  */
 import { clamp01 } from '../core/math';
-import { BuildingKind, RoadType } from './types';
-import { CityState, ROAD_UPKEEP, logEvent, tileIndex } from './city';
+import { Building, BuildingKind, RoadType } from './types';
+import { CityState, ROAD_UPKEEP, buildingTiles, logEvent, tileIndex } from './city';
 import { getDef } from '../data/buildings';
 import { countRoads } from './roads';
 import { wallStats } from './walls';
@@ -37,19 +37,48 @@ export interface MonthlyStatement {
   net: number;
 }
 
-/** Tax income for one month, before upkeep. */
-export function collectTaxes(city: CityState): {
+/**
+ * The land value a building is taxed on: the mean over its whole footprint
+ * rather than the value under its anchor tile, which for anything larger
+ * than 1x1 is an arbitrary corner of a gradient.
+ */
+export function ratedLandValue(city: CityState, building: Building): number {
+  let total = 0;
+  let count = 0;
+  for (const tile of buildingTiles(building)) {
+    if (tile.x < 0 || tile.y < 0 || tile.x >= city.width || tile.y >= city.height) continue;
+    total += city.landValue[tileIndex(city, tile.x, tile.y)];
+    count++;
+  }
+  if (count === 0) return city.landValue[tileIndex(city, building.x, building.y)];
+  return total / count;
+}
+
+/**
+ * One pass over the building map for both sides of the ledger. Taxes and
+ * building upkeep have different exemptions but the same iteration, and at
+ * 8x speed on a phone the month's settlement is one of the few whole-map
+ * passes left, so it walks the map once.
+ */
+function surveyBuildings(city: CityState): {
   residential: number;
   commercial: number;
   industrial: number;
+  upkeep: number;
 } {
   let residential = 0;
   let commercial = 0;
   let industrial = 0;
+  let upkeep = 0;
 
   for (const building of city.buildings.values()) {
-    if (building.abandoned || !building.connected) continue;
-    const value = 0.65 + city.landValue[tileIndex(city, building.x, building.y)] * 0.9;
+    // A ruin pays no rates, but it is not billed for its upkeep either.
+    if (building.abandoned) continue;
+    upkeep += getDef(building.defId).upkeep;
+
+    // Premises cut off from the road network are earning nothing to tax.
+    if (!building.connected) continue;
+    const value = 0.65 + ratedLandValue(city, building) * 0.9;
 
     if (building.kind === BuildingKind.Dwelling) {
       residential += building.residents * TAX_PER_RESIDENT * city.budget.taxRateResidential * value;
@@ -62,21 +91,39 @@ export function collectTaxes(city: CityState): {
     }
   }
 
+  return { residential, commercial, industrial, upkeep };
+}
+
+/** Tax income for one month, before upkeep. */
+export function collectTaxes(city: CityState): {
+  residential: number;
+  commercial: number;
+  industrial: number;
+} {
+  const { residential, commercial, industrial } = surveyBuildings(city);
   return { residential, commercial, industrial };
 }
 
-/** Everything the city pays for each month. */
+/**
+ * Everything the city pays for each month.
+ *
+ * The road and wall tallies are full scans. They look like obvious
+ * candidates for counters maintained by `placeRoad`/`removeRoad`, but
+ * `city.roads` is also written directly — by `layKingsRoad` when the valley
+ * is generated and by `demolish`, among others — so a counter would drift
+ * silently out of step with the map it claims to describe. Scanning stays
+ * honest; measure before trading that away.
+ */
 export function totalUpkeep(city: CityState): {
   buildings: number;
   roads: number;
   walls: number;
 } {
-  let buildings = 0;
-  for (const building of city.buildings.values()) {
-    if (building.abandoned) continue;
-    buildings += getDef(building.defId).upkeep;
-  }
+  return { buildings: surveyBuildings(city).upkeep, ...roadAndWallUpkeep(city) };
+}
 
+/** The infrastructure half of the bill: everything not a building. */
+function roadAndWallUpkeep(city: CityState): { roads: number; walls: number } {
   const roadCounts = countRoads(city);
   const roads =
     roadCounts[RoadType.Path] * ROAD_UPKEEP[RoadType.Path] * DAYS_PER_MONTH +
@@ -86,15 +133,28 @@ export function totalUpkeep(city: CityState): {
   const { walls: wallTiles, towers, gates } = wallStats(city);
   const walls = wallTiles * WALL_UPKEEP + towers * TOWER_UPKEEP + gates * GATE_UPKEEP;
 
-  return { buildings, roads, walls };
+  return { roads, walls };
 }
 
-/** Close the books on a month and pay out. */
+/**
+ * Close the books on a month and pay out.
+ *
+ * Taxes and upkeep move the treasury here, on the thirtieth. Trade does
+ * not: `tradeWithWorld` in `sim/trade.ts` pays the city the day the caravans
+ * arrive, and `budget.tradeAccumulator` only mirrors what it already paid,
+ * so the ledger can show the month's trade as a line of its own. Adding
+ * that mirror to `gold` below would pay the city twice — `net` folds it in
+ * only because it reports the whole month's movement, not this function's
+ * own.
+ */
 export function settleMonth(city: CityState): MonthlyStatement {
-  const taxes = collectTaxes(city);
-  const upkeep = totalUpkeep(city);
+  const survey = surveyBuildings(city);
+  const upkeep = {
+    buildings: survey.upkeep,
+    ...roadAndWallUpkeep(city),
+  };
 
-  const income = taxes.residential + taxes.commercial + taxes.industrial;
+  const income = survey.residential + survey.commercial + survey.industrial;
   const costs = upkeep.buildings + upkeep.roads + upkeep.walls;
   const trade = city.budget.tradeAccumulator;
 
@@ -102,8 +162,6 @@ export function settleMonth(city: CityState): MonthlyStatement {
   city.budget.lastIncome = income;
   city.budget.lastUpkeep = costs;
   city.budget.lastTrade = trade;
-  city.budget.incomeAccumulator = 0;
-  city.budget.upkeepAccumulator = 0;
   city.budget.tradeAccumulator = 0;
 
   const net = income - costs + trade;
@@ -115,9 +173,9 @@ export function settleMonth(city: CityState): MonthlyStatement {
   }
 
   return {
-    residentialTax: taxes.residential,
-    commercialTax: taxes.commercial,
-    industrialTax: taxes.industrial,
+    residentialTax: survey.residential,
+    commercialTax: survey.commercial,
+    industrialTax: survey.industrial,
     buildingUpkeep: upkeep.buildings,
     roadUpkeep: upkeep.roads,
     wallUpkeep: upkeep.walls,

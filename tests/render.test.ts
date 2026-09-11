@@ -14,7 +14,7 @@ import {
 } from '@/render/iso';
 import { PALETTE, ROOF_SETS, hexToRgb, mix, rgbToHex, shade, withAlpha } from '@/render/palette';
 import { Camera, MAX_ZOOM, MIN_ZOOM } from '@/render/camera';
-import { buildingDepth, directionOf, sampleElevation, treeDepth } from '@/render/renderer';
+import { buildingDepth, directionOf, sampleElevation, scatterDepth } from '@/render/renderer';
 import { makeFlatCity } from './helpers';
 import { tileIndex } from '@/sim/city';
 
@@ -223,9 +223,9 @@ describe('draw order', () => {
   });
 
   it('sorts a tree from where it actually stands within its tile', () => {
-    const south = treeDepth(4, 4, { ox: 0, oy: 0.35 }, 0);
-    const centre = treeDepth(4, 4, { ox: 0, oy: 0 }, 0);
-    const north = treeDepth(4, 4, { ox: 0, oy: -0.35 }, 0);
+    const south = scatterDepth(4, 4, { ox: 0, oy: 0.35 }, 0);
+    const centre = scatterDepth(4, 4, { ox: 0, oy: 0 }, 0);
+    const north = scatterDepth(4, 4, { ox: 0, oy: -0.35 }, 0);
     // Nudged toward the south corner it stands in front of its own tile.
     expect(south).toBeGreaterThan(centre);
     expect(north).toBeLessThan(centre);
@@ -235,8 +235,8 @@ describe('draw order', () => {
   it('does not change a tree’s depth when it is nudged along its own diagonal', () => {
     // East-west on screen moves a tree along the diagonal it already sorts
     // on, so its depth must not move with it.
-    expect(treeDepth(4, 4, { ox: 0.4, oy: 0 }, 0)).toBeCloseTo(depthOf(4, 4), 6);
-    expect(treeDepth(4, 4, { ox: -0.4, oy: 0 }, 0)).toBeCloseTo(depthOf(4, 4), 6);
+    expect(scatterDepth(4, 4, { ox: 0.4, oy: 0 }, 0)).toBeCloseTo(depthOf(4, 4), 6);
+    expect(scatterDepth(4, 4, { ox: -0.4, oy: 0 }, 0)).toBeCloseTo(depthOf(4, 4), 6);
   });
 
   it('separates two people standing on the same tile', () => {
