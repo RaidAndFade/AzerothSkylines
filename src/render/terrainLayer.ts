@@ -1,77 +1,30 @@
 /**
  * Ground rendering.
  *
- * Terrain is drawn as batched isometric diamonds: every visible tile is
- * visited exactly once, bucketed by class and shade, and each bucket is
- * filled in a single path. That keeps a full screen of Elwynn down to a few
- * dozen draw calls while still giving every tile its own slight variation in
- * colour.
+ * The valley's colour is baked once into a map-space field (see
+ * `groundTexture.ts`). Here it is painted onto the screen: the visible
+ * tiles are grouped into the largest possible rectangles of level ground,
+ * and each rectangle is drawn with a single affine transform that maps its
+ * square of the field onto its diamond on screen. Because the field is
+ * interpolated, colour runs continuously across tile boundaries — there is
+ * no grid to see.
  *
- * The loop is deliberately allocation-free — no points, no rectangles, no
- * closures per tile — because at the widest zoom it runs over the whole
- * valley every frame.
+ * Cliff faces, shoreline foam, brushed grain and the zoning overlay are
+ * drawn on top.
  */
 import { ELEVATION_STEP, HALF_HEIGHT, HALF_WIDTH } from './iso';
-import { PALETTE, mix, shade, withAlpha } from './palette';
+import { PALETTE, withAlpha } from './palette';
+import { light } from './light';
+import { CLIFF_BASE, GroundField } from './groundTexture';
 import { Terrain, Zone } from '../sim/types';
 import { CityState, PARCEL_SIZE } from '../sim/city';
-import { MAX_ELEVATION } from '../sim/terrain';
 import { hash2 } from '../core/rng';
+import { drawRoads } from './roadLayer';
 
-/** How many shade steps each terrain class is split into when batching. */
-const SHADE_STEPS = 4;
 /** Below this zoom the fine detail costs more than it adds. */
 export const DETAIL_ZOOM = 0.5;
-
-/** Base colours for each terrain class, dark to light across the shade steps. */
-const TERRAIN_RAMPS: Record<number, [string, string]> = {
-  [Terrain.DeepWater]: [PALETTE.waterDeep, PALETTE.water],
-  [Terrain.ShallowWater]: [PALETTE.water, PALETTE.waterShallow],
-  [Terrain.Sand]: [PALETTE.sandDark, PALETTE.sand],
-  [Terrain.Grass]: [PALETTE.grassDark, PALETTE.grassLight],
-  [Terrain.Meadow]: [PALETTE.grass, PALETTE.meadowLight],
-  [Terrain.Forest]: [PALETTE.forestFloorDark, PALETTE.forestFloor],
-  [Terrain.Rock]: [PALETTE.rockDark, PALETTE.rockLight],
-  [Terrain.Snow]: [PALETTE.snowShade, PALETTE.snow],
-};
-
-/** Cliff-face colours, matched to the terrain standing on top of them. */
-const CLIFF_COLORS: Record<number, string> = {
-  [Terrain.Sand]: PALETTE.sandDark,
-  [Terrain.Grass]: PALETTE.dirt,
-  [Terrain.Meadow]: PALETTE.dirt,
-  [Terrain.Forest]: PALETTE.dirtDark,
-  [Terrain.Rock]: PALETTE.rockDark,
-  [Terrain.Snow]: PALETTE.rock,
-  [Terrain.DeepWater]: PALETTE.waterDeep,
-  [Terrain.ShallowWater]: PALETTE.water,
-};
-
-/** Every colour a tile top can take, flattened into one lookup. */
-const GROUND_COLORS: string[] = [];
-/** Cliff colours, one lit and one shaded per terrain class. */
-const CLIFF_LIT: string[] = [];
-const CLIFF_SHADED: string[] = [];
-for (let terrain = 0; terrain <= Terrain.Snow; terrain++) {
-  const ramp = TERRAIN_RAMPS[terrain] ?? [PALETTE.grassDark, PALETTE.grassLight];
-  for (let step = 0; step < SHADE_STEPS; step++) {
-    GROUND_COLORS[terrain * SHADE_STEPS + step] = mix(ramp[0], ramp[1], step / (SHADE_STEPS - 1));
-  }
-  const cliff = CLIFF_COLORS[terrain] ?? PALETTE.dirt;
-  CLIFF_LIT[terrain] = shade(cliff, -0.08);
-  CLIFF_SHADED[terrain] = shade(cliff, -0.26);
-}
-
-const ZONE_FILL: Record<number, string> = {
-  [Zone.Residential]: withAlpha(PALETTE.zoneResidential, 0.42),
-  [Zone.Commercial]: withAlpha(PALETTE.zoneCommercial, 0.42),
-  [Zone.Industrial]: withAlpha(PALETTE.zoneIndustrial, 0.42),
-};
-const ZONE_EDGE: Record<number, string> = {
-  [Zone.Residential]: withAlpha(PALETTE.zoneResidential, 0.85),
-  [Zone.Commercial]: withAlpha(PALETTE.zoneCommercial, 0.85),
-  [Zone.Industrial]: withAlpha(PALETTE.zoneIndustrial, 0.85),
-};
+/** Above this zoom, individual blades and pebbles are worth drawing. */
+export const FLORA_ZOOM = 0.95;
 
 export interface TileRange {
   x0: number;
@@ -88,22 +41,401 @@ export interface ViewRect {
 }
 
 export interface TerrainDrawOptions {
-  /** Seconds since start, for the water shimmer. */
   time: number;
-  /** Draw the zoning paint over the ground. */
   showZones: boolean;
-  /** Current camera zoom, which decides how much detail is worth drawing. */
   zoom: number;
 }
 
-/** Reused path buckets, so a frame allocates nothing per tile. */
-const groundPaths: (Path2D | null)[] = [];
-const cliffPaths: (Path2D | null)[] = [];
-const zonePaths: (Path2D | null)[] = [];
-let shorePath: Path2D | null = null;
-let unownedPath: Path2D | null = null;
+/** A run of tiles all at the same height, drawn as one image. */
+interface LevelPatch {
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+  elevation: number;
+}
 
-function diamond(path: Path2D, cx: number, cy: number, scale = 1): void {
+const visited = new Map<number, Uint8Array>();
+const patches: LevelPatch[] = [];
+const zonePaths: (Path2D | null)[] = [];
+let grainPattern: CanvasPattern | null = null;
+let grainSource: HTMLCanvasElement | null = null;
+
+const ZONE_FILL: Record<number, string> = {
+  [Zone.Residential]: withAlpha(PALETTE.zoneResidential, 0.34),
+  [Zone.Commercial]: withAlpha(PALETTE.zoneCommercial, 0.34),
+  [Zone.Industrial]: withAlpha(PALETTE.zoneIndustrial, 0.34),
+};
+const ZONE_EDGE: Record<number, string> = {
+  [Zone.Residential]: withAlpha(PALETTE.zoneResidential, 0.8),
+  [Zone.Commercial]: withAlpha(PALETTE.zoneCommercial, 0.8),
+  [Zone.Industrial]: withAlpha(PALETTE.zoneIndustrial, 0.8),
+};
+
+/** Paint the ground for every tile in range. The camera transform is live. */
+export function drawTerrain(
+  ctx: CanvasRenderingContext2D,
+  city: CityState,
+  field: GroundField,
+  view: ViewRect,
+  range: TileRange,
+  options: TerrainDrawOptions,
+): void {
+  const detail = options.zoom >= DETAIL_ZOOM;
+
+  collectLevelPatches(city, range);
+  drawGroundPatches(ctx, field);
+  if (detail) drawCliffs(ctx, city, view, range);
+  // Grain is a full-screen textured fill; from far away it is not worth it.
+  if (detail) drawGrain(ctx, field, view);
+  drawRoads(ctx, city, view, range, options.zoom);
+  if (detail) {
+    drawShoreline(ctx, city, view, range, options.time);
+    drawWaterSheen(ctx, city, view, range, options.time);
+  }
+  drawUnowned(ctx, city, view, range);
+  if (options.showZones) drawZones(ctx, city, view, range, detail);
+}
+
+/**
+ * Greedy-mesh the visible tiles into maximal rectangles of equal height.
+ * On the valley floor this collapses thousands of tiles into a handful of
+ * images, and it means level ground is drawn without any internal seams.
+ */
+function collectLevelPatches(city: CityState, range: TileRange): void {
+  patches.length = 0;
+  const width = range.x1 - range.x0 + 1;
+  const height = range.y1 - range.y0 + 1;
+  if (width <= 0 || height <= 0) return;
+
+  const size = width * height;
+  let seen = visited.get(size);
+  if (!seen) {
+    seen = new Uint8Array(size);
+    visited.set(size, seen);
+    // One scratch buffer per viewport size is plenty; drop any others.
+    if (visited.size > 4) {
+      for (const key of visited.keys()) {
+        if (key !== size) {
+          visited.delete(key);
+          break;
+        }
+      }
+    }
+  }
+  seen.fill(0);
+
+  const elevation = city.map.elevation;
+  const mapWidth = city.width;
+
+  for (let ly = 0; ly < height; ly++) {
+    for (let lx = 0; lx < width; lx++) {
+      const local = ly * width + lx;
+      if (seen[local]) continue;
+      const x = range.x0 + lx;
+      const y = range.y0 + ly;
+      const step = elevation[y * mapWidth + x];
+
+      // Extend right while the height holds.
+      let runWidth = 1;
+      while (
+        lx + runWidth < width &&
+        !seen[local + runWidth] &&
+        elevation[y * mapWidth + x + runWidth] === step
+      ) {
+        runWidth++;
+      }
+
+      // Then extend down while every tile of the next row matches.
+      let runHeight = 1;
+      outer: while (ly + runHeight < height) {
+        const rowBase = (ly + runHeight) * width + lx;
+        for (let i = 0; i < runWidth; i++) {
+          if (seen[rowBase + i]) break outer;
+          if (elevation[(y + runHeight) * mapWidth + x + i] !== step) break outer;
+        }
+        runHeight++;
+      }
+
+      for (let dy = 0; dy < runHeight; dy++) {
+        seen.fill(1, (ly + dy) * width + lx, (ly + dy) * width + lx + runWidth);
+      }
+      patches.push({ x0: x, y0: y, x1: x + runWidth - 1, y1: y + runHeight - 1, elevation: step });
+    }
+  }
+
+  // Painter's order: ground furthest from the camera first.
+  patches.sort((a, b) => a.x0 + a.y0 - (b.x0 + b.y0));
+}
+
+/**
+ * Draw each patch by mapping its square of the colour field onto its
+ * diamond. The transform takes map space straight to screen space, so one
+ * call covers however many tiles the patch holds.
+ */
+function drawGroundPatches(ctx: CanvasRenderingContext2D, field: GroundField): void {
+  const scale = field.scale;
+  const a = HALF_WIDTH / scale;
+  const b = HALF_HEIGHT / scale;
+
+  ctx.save();
+  ctx.imageSmoothingEnabled = true;
+  // The field was baked with high-quality interpolation and is already
+  // smooth, so bilinear here costs a fraction of the time and looks the same.
+  ctx.imageSmoothingQuality = 'low';
+  // The camera transform, to compose each patch's mapping onto.
+  const camera = ctx.getTransform();
+
+  for (const patch of patches) {
+    const sx = patch.x0 * scale;
+    const sy = patch.y0 * scale;
+    const sw = (patch.x1 - patch.x0 + 1) * scale;
+    const sh = (patch.y1 - patch.y0 + 1) * scale;
+
+    // Map field pixel (px, py) to ((px - py) * a, (px + py) * b), lifted by
+    // the patch's height and shifted so a tile's centre lands where the rest
+    // of the renderer expects it.
+    ctx.setTransform(camera);
+    ctx.transform(a, b, -a, b, 0, -HALF_HEIGHT - patch.elevation * ELEVATION_STEP);
+    // A hair of overlap hides any seam between neighbouring patches.
+    ctx.drawImage(field.canvas, sx, sy, sw, sh, sx, sy, sw + 0.6, sh + 0.6);
+  }
+  ctx.restore();
+}
+
+/** The two sides of a tile that show when the ground drops away below it. */
+function drawCliffs(
+  ctx: CanvasRenderingContext2D,
+  city: CityState,
+  view: ViewRect,
+  range: TileRange,
+): void {
+  const width = city.width;
+  const elevation = city.map.elevation;
+  const terrain = city.map.terrain;
+  const lit = new Map<string, Path2D>();
+
+  for (let y = range.y0; y <= range.y1; y++) {
+    for (let x = range.x0; x <= range.x1; x++) {
+      const index = y * width + x;
+      const step = elevation[index];
+      const south = y + 1 <= city.height - 1 ? elevation[index + width] : step;
+      const east = x + 1 <= width - 1 ? elevation[index + 1] : step;
+      if (step <= south && step <= east) continue;
+
+      const cx = (x - y) * HALF_WIDTH;
+      const cy = (x + y) * HALF_HEIGHT - step * ELEVATION_STEP;
+      if (cx + HALF_WIDTH < view.left || cx - HALF_WIDTH > view.right) continue;
+      if (cy > view.bottom + 200 || cy + 260 < view.top) continue;
+
+      const base = CLIFF_BASE[terrain[index]] ?? '#8A7048';
+
+      if (step > south) {
+        const key = `${base}|l`;
+        let path = lit.get(key);
+        if (!path) {
+          path = new Path2D();
+          lit.set(key, path);
+        }
+        const drop = (step - south) * ELEVATION_STEP;
+        path.moveTo(cx - HALF_WIDTH, cy);
+        path.lineTo(cx, cy + HALF_HEIGHT);
+        path.lineTo(cx, cy + HALF_HEIGHT + drop);
+        path.lineTo(cx - HALF_WIDTH, cy + drop);
+        path.closePath();
+      }
+      if (step > east) {
+        const key = `${base}|r`;
+        let path = lit.get(key);
+        if (!path) {
+          path = new Path2D();
+          lit.set(key, path);
+        }
+        const drop = (step - east) * ELEVATION_STEP;
+        path.moveTo(cx + HALF_WIDTH, cy);
+        path.lineTo(cx, cy + HALF_HEIGHT);
+        path.lineTo(cx, cy + HALF_HEIGHT + drop);
+        path.lineTo(cx + HALF_WIDTH, cy + drop);
+        path.closePath();
+      }
+    }
+  }
+
+  for (const [key, path] of lit) {
+    const [base, side] = key.split('|');
+    ctx.fillStyle = light(base, side === 'l' ? 'left' : 'right');
+    ctx.fill(path);
+  }
+}
+
+/**
+ * Brushed grain over the whole ground, anchored in world space so it moves
+ * with the map rather than swimming across it.
+ */
+function drawGrain(ctx: CanvasRenderingContext2D, field: GroundField, view: ViewRect): void {
+  if (grainSource !== field.grain || !grainPattern) {
+    grainPattern = ctx.createPattern(field.grain, 'repeat');
+    grainSource = field.grain;
+  }
+  if (!grainPattern) return;
+
+  ctx.save();
+  ctx.globalAlpha = 0.52;
+  ctx.fillStyle = grainPattern;
+  ctx.fillRect(view.left, view.top, view.right - view.left, view.bottom - view.top);
+  ctx.restore();
+}
+
+/** Wet sand and a line of foam where the water meets the land. */
+function drawShoreline(
+  ctx: CanvasRenderingContext2D,
+  city: CityState,
+  view: ViewRect,
+  range: TileRange,
+  time: number,
+): void {
+  const width = city.width;
+  const terrain = city.map.terrain;
+  const foam = new Path2D();
+  const wet = new Path2D();
+  let any = false;
+
+  for (let y = range.y0; y <= range.y1; y++) {
+    for (let x = range.x0; x <= range.x1; x++) {
+      const index = y * width + x;
+      if (terrain[index] > Terrain.ShallowWater) continue;
+      let landward = false;
+      if (x > 0 && terrain[index - 1] > Terrain.ShallowWater) landward = true;
+      else if (x < width - 1 && terrain[index + 1] > Terrain.ShallowWater) landward = true;
+      else if (y > 0 && terrain[index - width] > Terrain.ShallowWater) landward = true;
+      else if (y < city.height - 1 && terrain[index + width] > Terrain.ShallowWater) landward = true;
+      if (!landward) continue;
+
+      const cx = (x - y) * HALF_WIDTH;
+      const cy = (x + y) * HALF_HEIGHT;
+      if (cx + HALF_WIDTH < view.left || cx - HALF_WIDTH > view.right) continue;
+      if (cy + HALF_HEIGHT < view.top || cy - HALF_HEIGHT > view.bottom) continue;
+      any = true;
+
+      // The wet band sits inside the tile; the foam breathes in and out.
+      const swell = 0.62 + Math.sin(time * 0.9 + hash2(x, y, 3) * 6.28) * 0.14;
+      addDiamond(wet, cx, cy, 0.96);
+      addDiamond(foam, cx, cy, swell);
+    }
+  }
+  if (!any) return;
+
+  ctx.fillStyle = withAlpha('#4FA8C8', 0.4);
+  ctx.fill(wet);
+  ctx.fillStyle = withAlpha('#DFF3F6', 0.3);
+  ctx.fill(foam);
+}
+
+/** A slow sheen sliding over open water. */
+function drawWaterSheen(
+  ctx: CanvasRenderingContext2D,
+  city: CityState,
+  view: ViewRect,
+  range: TileRange,
+  time: number,
+): void {
+  const width = city.width;
+  const terrain = city.map.terrain;
+  ctx.save();
+  ctx.strokeStyle = withAlpha('#CFEDF3', 0.22);
+  ctx.lineWidth = 2.4;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  let any = false;
+
+  for (let y = range.y0; y <= range.y1; y += 1) {
+    for (let x = range.x0; x <= range.x1; x += 1) {
+      const index = y * width + x;
+      if (terrain[index] > Terrain.ShallowWater) continue;
+      const phase = hash2(x, y, 91) * Math.PI * 2;
+      const wobble = Math.sin(time * 1.1 + phase);
+      if (wobble < 0.55) continue;
+      const cx = (x - y) * HALF_WIDTH;
+      const cy = (x + y) * HALF_HEIGHT;
+      if (cx < view.left - 40 || cx > view.right + 40) continue;
+      if (cy < view.top - 40 || cy > view.bottom + 40) continue;
+      const drift = Math.cos(time * 0.7 + phase) * 8;
+      ctx.moveTo(cx - 11 + drift, cy + 1);
+      ctx.lineTo(cx + 3 + drift, cy - 2);
+      any = true;
+    }
+  }
+  if (any) ctx.stroke();
+  ctx.restore();
+}
+
+/** Land beyond the city's holdings reads cooler and a little further off. */
+function drawUnowned(
+  ctx: CanvasRenderingContext2D,
+  city: CityState,
+  view: ViewRect,
+  range: TileRange,
+): void {
+  const path = new Path2D();
+  let any = false;
+  for (let y = range.y0; y <= range.y1; y++) {
+    const parcelRow = Math.floor(y / PARCEL_SIZE) * city.parcelsWide;
+    for (let x = range.x0; x <= range.x1; x++) {
+      if (city.parcels[parcelRow + Math.floor(x / PARCEL_SIZE)]?.owned) continue;
+      const cx = (x - y) * HALF_WIDTH;
+      const cy = (x + y) * HALF_HEIGHT - city.map.elevation[y * city.width + x] * ELEVATION_STEP;
+      if (cx + HALF_WIDTH < view.left || cx - HALF_WIDTH > view.right) continue;
+      if (cy + HALF_HEIGHT < view.top || cy - HALF_HEIGHT > view.bottom) continue;
+      addDiamond(path, cx, cy, 1.02);
+      any = true;
+    }
+  }
+  if (!any) return;
+  ctx.fillStyle = 'rgba(30, 42, 70, 0.16)';
+  ctx.fill(path);
+}
+
+function drawZones(
+  ctx: CanvasRenderingContext2D,
+  city: CityState,
+  view: ViewRect,
+  range: TileRange,
+  detail: boolean,
+): void {
+  zonePaths.length = 0;
+  const width = city.width;
+  for (let y = range.y0; y <= range.y1; y++) {
+    for (let x = range.x0; x <= range.x1; x++) {
+      const index = y * width + x;
+      const zone = city.zones[index];
+      if (zone === Zone.None || city.buildingAt[index] >= 0) continue;
+      const cx = (x - y) * HALF_WIDTH;
+      const cy = (x + y) * HALF_HEIGHT - city.map.elevation[index] * ELEVATION_STEP;
+      if (cx + HALF_WIDTH < view.left || cx - HALF_WIDTH > view.right) continue;
+      if (cy + HALF_HEIGHT < view.top || cy - HALF_HEIGHT > view.bottom) continue;
+      let path = zonePaths[zone];
+      if (!path) {
+        path = new Path2D();
+        zonePaths[zone] = path;
+      }
+      addDiamond(path, cx, cy, 1.02);
+    }
+  }
+  for (let i = 0; i < zonePaths.length; i++) {
+    const path = zonePaths[i];
+    if (!path) continue;
+    if (detail) {
+      ctx.strokeStyle = ZONE_EDGE[i];
+      ctx.lineWidth = 3;
+      ctx.lineJoin = 'round';
+      ctx.stroke(path);
+    }
+    ctx.fillStyle = ZONE_FILL[i];
+    ctx.fill(path);
+  }
+}
+
+function addDiamond(path: Path2D, cx: number, cy: number, scale: number): void {
   const hw = HALF_WIDTH * scale;
   const hh = HALF_HEIGHT * scale;
   path.moveTo(cx, cy - hh);
@@ -111,198 +443,6 @@ function diamond(path: Path2D, cx: number, cy: number, scale = 1): void {
   path.lineTo(cx, cy + hh);
   path.lineTo(cx - hw, cy);
   path.closePath();
-}
-
-/**
- * Paint the ground for every tile in the given range, in a single pass.
- * The context must already carry the camera transform.
- */
-export function drawTerrain(
-  ctx: CanvasRenderingContext2D,
-  city: CityState,
-  view: ViewRect,
-  range: TileRange,
-  options: TerrainDrawOptions,
-): void {
-  groundPaths.length = 0;
-  cliffPaths.length = 0;
-  zonePaths.length = 0;
-  shorePath = null;
-  unownedPath = null;
-
-  const detail = options.zoom >= DETAIL_ZOOM;
-  const width = city.width;
-  const seed = city.map.seed;
-  const elevation = city.map.elevation;
-  const terrainData = city.map.terrain;
-  const moisture = city.map.moisture;
-
-  // Shimmer needs the water tiles; collected inline to avoid a second pass.
-  const shimmerX: number[] = [];
-  const shimmerY: number[] = [];
-
-  for (let y = range.y0; y <= range.y1; y++) {
-    const rowIndex = y * width;
-    for (let x = range.x0; x <= range.x1; x++) {
-      const index = rowIndex + x;
-      const step = elevation[index];
-      const cx = (x - y) * HALF_WIDTH;
-      const cy = (x + y) * HALF_HEIGHT - step * ELEVATION_STEP;
-
-      // Inline culling: a rectangle test, no allocation.
-      if (cx + HALF_WIDTH < view.left || cx - HALF_WIDTH > view.right) continue;
-      if (cy + HALF_HEIGHT + ELEVATION_STEP * 3 < view.top || cy - HALF_HEIGHT - 4 > view.bottom) continue;
-
-      const terrain = terrainData[index];
-
-      // --- cliff faces, for the two sides that can be seen below a tile ---
-      if (detail) {
-        const southStep = y + 1 <= city.height - 1 ? elevation[index + width] : step;
-        const eastStep = x + 1 <= width - 1 ? elevation[index + 1] : step;
-        if (step > southStep) {
-          let path = cliffPaths[terrain];
-          if (!path) {
-            path = new Path2D();
-            cliffPaths[terrain] = path;
-          }
-          const drop = (step - southStep) * ELEVATION_STEP;
-          path.moveTo(cx - HALF_WIDTH, cy);
-          path.lineTo(cx, cy + HALF_HEIGHT);
-          path.lineTo(cx, cy + HALF_HEIGHT + drop);
-          path.lineTo(cx - HALF_WIDTH, cy + drop);
-          path.closePath();
-        }
-        if (step > eastStep) {
-          const shadedIndex = terrain + 16;
-          let path = cliffPaths[shadedIndex];
-          if (!path) {
-            path = new Path2D();
-            cliffPaths[shadedIndex] = path;
-          }
-          const drop = (step - eastStep) * ELEVATION_STEP;
-          path.moveTo(cx + HALF_WIDTH, cy);
-          path.lineTo(cx, cy + HALF_HEIGHT);
-          path.lineTo(cx, cy + HALF_HEIGHT + drop);
-          path.lineTo(cx + HALF_WIDTH, cy + drop);
-          path.closePath();
-        }
-      }
-
-      // --- the tile top ---------------------------------------------------
-      const variation = hash2(x, y, seed);
-      let bucket = Math.floor(
-        (variation * 0.55 + moisture[index] * 0.3 + (step / MAX_ELEVATION) * 0.15) * SHADE_STEPS,
-      );
-      if (bucket < 0) bucket = 0;
-      else if (bucket >= SHADE_STEPS) bucket = SHADE_STEPS - 1;
-
-      const key = terrain * SHADE_STEPS + bucket;
-      let ground = groundPaths[key];
-      if (!ground) {
-        ground = new Path2D();
-        groundPaths[key] = ground;
-      }
-      diamond(ground, cx, cy);
-
-      // --- water edges and glints ------------------------------------------
-      if (terrain <= Terrain.ShallowWater) {
-        if (detail) {
-          const landward =
-            (x > 0 && terrainData[index - 1] > Terrain.ShallowWater) ||
-            (x < width - 1 && terrainData[index + 1] > Terrain.ShallowWater) ||
-            (y > 0 && terrainData[index - width] > Terrain.ShallowWater) ||
-            (y < city.height - 1 && terrainData[index + width] > Terrain.ShallowWater);
-          if (landward) {
-            if (!shorePath) shorePath = new Path2D();
-            diamond(shorePath, cx, cy);
-          }
-          shimmerX.push(cx);
-          shimmerY.push(cy);
-        }
-      }
-
-      // --- land the city does not hold --------------------------------------
-      const parcel = city.parcels[Math.floor(y / PARCEL_SIZE) * city.parcelsWide + Math.floor(x / PARCEL_SIZE)];
-      if (!parcel?.owned) {
-        if (!unownedPath) unownedPath = new Path2D();
-        diamond(unownedPath, cx, cy);
-      }
-
-      // --- zoning paint, where nothing has been built yet --------------------
-      if (options.showZones) {
-        const zone = city.zones[index];
-        if (zone !== Zone.None && city.buildingAt[index] < 0) {
-          let path = zonePaths[zone];
-          if (!path) {
-            path = new Path2D();
-            zonePaths[zone] = path;
-          }
-          diamond(path, cx, cy, 0.82);
-        }
-      }
-    }
-  }
-
-  // --- one fill per bucket ------------------------------------------------
-  for (let i = 0; i < cliffPaths.length; i++) {
-    const path = cliffPaths[i];
-    if (!path) continue;
-    ctx.fillStyle = i >= 16 ? CLIFF_SHADED[i - 16] : CLIFF_LIT[i];
-    ctx.fill(path);
-  }
-  for (let i = 0; i < groundPaths.length; i++) {
-    const path = groundPaths[i];
-    if (!path) continue;
-    ctx.fillStyle = GROUND_COLORS[i];
-    ctx.fill(path);
-  }
-  if (shorePath) {
-    ctx.fillStyle = withAlpha(PALETTE.waterShallow, 0.55);
-    ctx.fill(shorePath);
-  }
-  if (detail && shimmerX.length > 0) drawWaterShimmer(ctx, shimmerX, shimmerY, options.time, seed);
-  if (unownedPath) {
-    ctx.fillStyle = 'rgba(28, 34, 56, 0.2)';
-    ctx.fill(unownedPath);
-  }
-  for (let i = 0; i < zonePaths.length; i++) {
-    const path = zonePaths[i];
-    if (!path) continue;
-    ctx.fillStyle = ZONE_FILL[i];
-    ctx.fill(path);
-    // Stroking thousands of subpaths is expensive, and the outline adds
-    // nothing once each plot is a few pixels across.
-    if (detail) {
-      ctx.strokeStyle = ZONE_EDGE[i];
-      ctx.lineWidth = 1.4;
-      ctx.stroke(path);
-    }
-  }
-}
-
-/** Slow, cheap highlights drifting across the water. */
-function drawWaterShimmer(
-  ctx: CanvasRenderingContext2D,
-  xs: number[],
-  ys: number[],
-  time: number,
-  seed: number,
-): void {
-  ctx.strokeStyle = withAlpha(PALETTE.waterFoam, 0.3);
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  let any = false;
-  for (let i = 0; i < xs.length; i++) {
-    const phase = hash2(Math.round(xs[i]), Math.round(ys[i]), seed ^ 91) * Math.PI * 2;
-    const wobble = Math.sin(time * 1.3 + phase);
-    // Only about a third of tiles carry a glint at any moment.
-    if (wobble < 0.45) continue;
-    const offset = Math.cos(time * 0.9 + phase) * 7;
-    ctx.moveTo(xs[i] - 9 + offset, ys[i]);
-    ctx.lineTo(xs[i] + 4 + offset, ys[i] - 2);
-    any = true;
-  }
-  if (any) ctx.stroke();
 }
 
 /** Outline one tile, for cursors and build previews. */
@@ -348,8 +488,7 @@ export function strokeTileRect(
 ): void {
   const cx = Math.min(city.width - 1, Math.max(0, x));
   const cy = Math.min(city.height - 1, Math.max(0, y));
-  const step = city.map.elevation[cy * city.width + cx];
-  const lift = step * ELEVATION_STEP;
+  const lift = city.map.elevation[cy * city.width + cx] * ELEVATION_STEP;
   const project = (tx: number, ty: number) => ({
     x: (tx - ty) * HALF_WIDTH,
     y: (tx + ty) * HALF_HEIGHT - lift,

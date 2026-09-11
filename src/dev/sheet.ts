@@ -7,8 +7,8 @@
  */
 import { ALL_BUILDING_DEFS } from '../data/buildings';
 import { getBuildingSprite } from '../render/buildingSprites';
-import { getAgentSprite, getRoadSprite, getTreeSprite, getWallSprite } from '../render/propSprites';
-import { AgentKind, RoadType } from '../sim/types';
+import { getAgentSprite, getPropSprite, getTreeSprite, getWallSprite } from '../render/propSprites';
+import { AgentKind } from '../sim/types';
 
 function section(title: string): HTMLElement {
   const heading = document.createElement('h2');
@@ -97,20 +97,18 @@ function main(): void {
   current.appendChild(cell(getWallSprite('gate', 0b0101, 0), 'gate N-S'));
   current.appendChild(cell(getWallSprite('gate', 0b1010, 1), 'gate E-W'));
 
-  root.appendChild(section('Roads'));
-  current = row();
-  root.appendChild(current);
-  for (const type of [RoadType.Path, RoadType.Cobble, RoadType.Avenue]) {
-    for (const mask of [0b0101, 0b1010, 0b1111, 0b0011, 0b0001]) {
-      current.appendChild(cell(getRoadSprite(type, mask), `${RoadType[type]} ${mask.toString(2).padStart(4, '0')}`));
-    }
-  }
-
   root.appendChild(section('Trees'));
   current = row();
   root.appendChild(current);
-  for (let variant = 0; variant < 4; variant++) {
+  for (let variant = 0; variant < 6; variant++) {
     current.appendChild(cell(getTreeSprite(variant), `tree ${variant}`));
+  }
+
+  root.appendChild(section('Ground props'));
+  current = row();
+  root.appendChild(current);
+  for (let variant = 0; variant < 6; variant++) {
+    current.appendChild(cell(getPropSprite(variant), `prop ${variant}`));
   }
 
   root.appendChild(section('People and Carts'));

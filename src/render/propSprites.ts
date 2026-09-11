@@ -4,10 +4,23 @@
  * and carts that move along it.
  */
 import { HALF_HEIGHT, HALF_WIDTH, TILE_HEIGHT, TILE_WIDTH } from './iso';
-import { PALETTE, mix, shade, withAlpha } from './palette';
-import { OUTLINE, Point, boxColors, fillFace, groundShadow, isoBox, lerpPoint, polygon } from './shapes';
-import { AgentKind, RoadType } from '../sim/types';
-import { hash2 } from '../core/rng';
+import { PALETTE, mix, withAlpha } from './palette';
+import {
+  OUTLINE,
+  Point,
+  Skin,
+  castShadow,
+  coneRoof,
+  cylinder,
+  groundShadow,
+  isoBox,
+  lerpPoint,
+  strokeSilhouette,
+} from './shapes';
+import { light } from './light';
+import { paintFace } from './materials';
+import { AgentKind } from '../sim/types';
+import { Rng } from '../core/rng';
 
 export interface Sprite {
   canvas: HTMLCanvasElement;
@@ -27,8 +40,11 @@ function makeCanvas(width: number, height: number): { canvas: HTMLCanvasElement;
 
 // --- Trees ------------------------------------------------------------------
 
-/** Elwynn's four common stands: oak, pine, birch and a turning maple. */
-export const TREE_VARIANTS = 4;
+/**
+ * Elwynn's stands: oak, pine, birch, a turning maple, and the scrub and
+ * saplings that fill the gaps between them.
+ */
+export const TREE_VARIANTS = 6;
 const treeCache: Sprite[] = [];
 
 export function getTreeSprite(variant: number): Sprite {
@@ -40,208 +56,408 @@ export function getTreeSprite(variant: number): Sprite {
   return sprite;
 }
 
+interface Foliage {
+  deep: string;
+  mid: string;
+  lit: string;
+  rim: string;
+}
+
+const FOLIAGE: Foliage[] = [
+  { deep: '#1E4526', mid: '#2F6B36', lit: '#4E9247', rim: '#8FC45E' },
+  { deep: '#1A3D2A', mid: '#28603C', lit: '#3F8452', rim: '#79B872' },
+  { deep: '#26522A', mid: '#3C7A38', lit: '#5C9C48', rim: '#A3CC66' },
+  { deep: '#5C4A18', mid: '#8A7226', lit: '#B99A3A', rim: '#E0C463' },
+];
+
+/**
+ * A canopy built from overlapping lobes: a dark mass, lighter clumps on the
+ * sunward side, and a thin rim where the light catches the outer leaves.
+ */
+function canopy(
+  ctx: CanvasRenderingContext2D,
+  lobes: [number, number, number][],
+  palette: Foliage,
+): void {
+  // The whole mass in shadow first, so gaps between lobes stay dark.
+  ctx.beginPath();
+  for (const [x, y, r] of lobes) {
+    ctx.moveTo(x + r, y);
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+  }
+  ctx.fillStyle = palette.deep;
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(18, 30, 18, 0.5)';
+  ctx.lineWidth = 1.4;
+  ctx.lineJoin = 'round';
+  ctx.stroke();
+
+  // Mid tone pulled up and to the left, toward the sun.
+  ctx.beginPath();
+  for (const [x, y, r] of lobes) {
+    ctx.moveTo(x - r * 0.16 + r * 0.86, y - r * 0.14);
+    ctx.arc(x - r * 0.16, y - r * 0.14, r * 0.86, 0, Math.PI * 2);
+  }
+  ctx.fillStyle = palette.mid;
+  ctx.fill();
+
+  // Lit clumps, then a bright edge on the top-left of each.
+  ctx.beginPath();
+  for (const [x, y, r] of lobes) {
+    ctx.moveTo(x - r * 0.3 + r * 0.58, y - r * 0.3);
+    ctx.arc(x - r * 0.3, y - r * 0.3, r * 0.58, 0, Math.PI * 2);
+  }
+  ctx.fillStyle = palette.lit;
+  ctx.fill();
+
+  for (const [x, y, r] of lobes) {
+    ctx.beginPath();
+    ctx.arc(x - r * 0.34, y - r * 0.36, r * 0.44, Math.PI * 0.9, Math.PI * 1.75);
+    ctx.strokeStyle = withAlpha(palette.rim, 0.7);
+    ctx.lineWidth = Math.max(1.2, r * 0.18);
+    ctx.lineCap = 'round';
+    ctx.stroke();
+  }
+}
+
+/** A tapering trunk with a couple of limbs, drawn as a filled shape. */
+function trunk(
+  ctx: CanvasRenderingContext2D,
+  height: number,
+  width: number,
+  bark: string,
+  barkDark: string,
+  limbs = true,
+): void {
+  ctx.beginPath();
+  ctx.moveTo(-width, 0);
+  ctx.bezierCurveTo(-width * 0.8, -height * 0.5, -width * 0.55, -height * 0.7, -width * 0.4, -height);
+  ctx.lineTo(width * 0.4, -height);
+  ctx.bezierCurveTo(width * 0.55, -height * 0.7, width * 0.8, -height * 0.5, width, 0);
+  ctx.closePath();
+  ctx.fillStyle = bark;
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(30, 20, 12, 0.45)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  // Shadow down the right-hand side of the bole.
+  ctx.beginPath();
+  ctx.moveTo(width * 0.1, 0);
+  ctx.lineTo(width, 0);
+  ctx.bezierCurveTo(width * 0.8, -height * 0.5, width * 0.55, -height * 0.7, width * 0.4, -height);
+  ctx.lineTo(width * 0.05, -height);
+  ctx.closePath();
+  ctx.fillStyle = barkDark;
+  ctx.fill();
+
+  if (limbs) {
+    ctx.strokeStyle = bark;
+    ctx.lineCap = 'round';
+    ctx.lineWidth = width * 0.8;
+    ctx.beginPath();
+    ctx.moveTo(-width * 0.2, -height * 0.72);
+    ctx.lineTo(-width * 2.6, -height * 1.08);
+    ctx.moveTo(width * 0.2, -height * 0.82);
+    ctx.lineTo(width * 2.4, -height * 1.1);
+    ctx.stroke();
+  }
+}
+
 function drawTree(variant: number): Sprite {
-  const width = 52;
-  const height = 76;
+  const width = 62;
+  const height = 92;
   const { canvas, ctx } = makeCanvas(width, height);
   const originX = width / 2;
-  const originY = height - 6;
+  const originY = height - 7;
   ctx.translate(originX, originY);
 
-  groundShadow(ctx, { x: 0, y: 0 }, 15, 7, 0.3);
-
-  const trunk = variant === 2 ? '#D8D2C4' : PALETTE.timber;
-  const trunkDark = variant === 2 ? '#A8A294' : PALETTE.timberDark;
-
-  // Trunk, slightly tapered.
+  // Trees stand on the ground, so they cast along the sun like everything else.
+  ctx.save();
+  ctx.scale(1, 0.42);
   ctx.beginPath();
-  ctx.moveTo(-3.5, 0);
-  ctx.lineTo(-2, -26);
-  ctx.lineTo(2, -26);
-  ctx.lineTo(3.5, 0);
+  ctx.ellipse(13, 8, 19, 15, 0, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(34, 40, 60, 0.2)';
+  ctx.filter = 'blur(2px)';
+  ctx.fill();
+  ctx.restore();
+  groundShadow(ctx, { x: 0, y: 0 }, 15, 6, 0.28);
+
+  switch (variant) {
+    case 1: {
+      // Scots pine: a bare bole with tiered skirts of needles.
+      trunk(ctx, 40, 3.2, '#6B4A2C', '#432C19', false);
+      const palette = FOLIAGE[1];
+      for (let i = 0; i < 5; i++) {
+        const y = -26 - i * 11;
+        const spread = 22 - i * 3.6;
+        ctx.beginPath();
+        ctx.moveTo(-spread, y);
+        ctx.quadraticCurveTo(-spread * 0.4, y - 7, 0, y - 17);
+        ctx.quadraticCurveTo(spread * 0.4, y - 7, spread, y);
+        ctx.quadraticCurveTo(0, y + 5, -spread, y);
+        ctx.closePath();
+        ctx.fillStyle = i % 2 === 0 ? palette.mid : palette.deep;
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(18, 30, 18, 0.45)';
+        ctx.lineWidth = 1.1;
+        ctx.stroke();
+        // Light on the left edge of each skirt.
+        ctx.beginPath();
+        ctx.moveTo(-spread, y);
+        ctx.quadraticCurveTo(-spread * 0.4, y - 7, 0, y - 17);
+        ctx.strokeStyle = withAlpha(palette.lit, 0.75);
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      }
+      break;
+    }
+    case 2: {
+      // Birch: pale bole, light open crown.
+      trunk(ctx, 44, 3, '#D8D2C4', '#A8A294');
+      ctx.strokeStyle = 'rgba(60, 56, 48, 0.6)';
+      ctx.lineWidth = 1.2;
+      for (const y of [-8, -17, -27, -36]) {
+        ctx.beginPath();
+        ctx.moveTo(-2.6, y);
+        ctx.lineTo(0.4, y - 1);
+        ctx.stroke();
+      }
+      canopy(ctx, [
+        [-10, -54, 12],
+        [9, -52, 11],
+        [0, -64, 13],
+        [-13, -44, 9],
+        [12, -42, 9],
+      ], FOLIAGE[2]);
+      break;
+    }
+    case 3: {
+      // A maple on the turn.
+      trunk(ctx, 34, 4.4, '#6B4A2C', '#432C19');
+      canopy(ctx, [
+        [-11, -44, 14],
+        [11, -42, 13],
+        [0, -56, 15],
+        [-14, -33, 10],
+        [13, -32, 10],
+        [0, -34, 13],
+      ], FOLIAGE[3]);
+      break;
+    }
+    case 4: {
+      // Hazel scrub: low, dense, many stems.
+      ctx.strokeStyle = '#5A4028';
+      ctx.lineCap = 'round';
+      ctx.lineWidth = 2.2;
+      for (const lean of [-6, -2, 2, 6]) {
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.lineTo(lean, -14);
+        ctx.stroke();
+      }
+      canopy(ctx, [
+        [-8, -20, 10],
+        [8, -19, 9],
+        [0, -26, 11],
+      ], FOLIAGE[0]);
+      break;
+    }
+    case 5: {
+      // A sapling, barely more than a switch.
+      trunk(ctx, 20, 1.8, '#6B4A2C', '#432C19', false);
+      canopy(ctx, [
+        [-4, -24, 7],
+        [4, -23, 6],
+        [0, -29, 7],
+      ], FOLIAGE[2]);
+      break;
+    }
+    default: {
+      // The Elwynn oak: heavy bole, broad crown.
+      trunk(ctx, 32, 5, '#6B4A2C', '#432C19');
+      canopy(ctx, [
+        [-13, -44, 15],
+        [12, -42, 14],
+        [0, -57, 16],
+        [-16, -32, 11],
+        [15, -31, 11],
+        [0, -33, 14],
+      ], FOLIAGE[0]);
+      break;
+    }
+  }
+
+  return { canvas, originX, originY };
+}
+
+// --- Ground props -----------------------------------------------------------
+
+/** Stones, flowers, tufts, fallen wood, reeds and boulders. */
+export const PROP_VARIANTS = 6;
+const propCache: Sprite[] = [];
+
+export function getPropSprite(variant: number): Sprite {
+  const index = ((variant % PROP_VARIANTS) + PROP_VARIANTS) % PROP_VARIANTS;
+  const cached = propCache[index];
+  if (cached) return cached;
+  const sprite = drawProp(index);
+  propCache[index] = sprite;
+  return sprite;
+}
+
+function drawProp(variant: number): Sprite {
+  const width = 34;
+  const height = 30;
+  const { canvas, ctx } = makeCanvas(width, height);
+  const originX = width / 2;
+  const originY = height - 4;
+  ctx.translate(originX, originY);
+  const rng = new Rng(0x9f2 + variant * 977);
+
+  switch (variant) {
+    case 1: {
+      // A clump of peacebloom and wild marigold.
+      const blooms = ['#EDE7F2', '#F2D65C', '#D9799B', '#9FD4E8'];
+      for (let i = 0; i < 9; i++) {
+        const x = (rng.next() - 0.5) * 16;
+        const y = -rng.next() * 5;
+        ctx.strokeStyle = '#4A7A34';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(x, y);
+        ctx.lineTo(x + (rng.next() - 0.5) * 2, y - 4 - rng.next() * 3);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(x + (rng.next() - 0.5) * 2, y - 6 - rng.next() * 3, 1.6, 0, Math.PI * 2);
+        ctx.fillStyle = blooms[i % blooms.length];
+        ctx.fill();
+      }
+      break;
+    }
+    case 2: {
+      // A tuft of long grass.
+      for (let i = 0; i < 11; i++) {
+        const x = (rng.next() - 0.5) * 13;
+        const lean = (rng.next() - 0.5) * 7;
+        const tall = 5 + rng.next() * 7;
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.quadraticCurveTo(x + lean * 0.4, -tall * 0.7, x + lean, -tall);
+        ctx.strokeStyle = rng.next() < 0.4 ? '#86BC52' : '#5E9337';
+        ctx.lineWidth = 1.3;
+        ctx.lineCap = 'round';
+        ctx.stroke();
+      }
+      break;
+    }
+    case 3: {
+      // A fallen limb, gone soft with moss.
+      groundShadow(ctx, { x: 0, y: 0 }, 11, 4, 0.24);
+      ctx.beginPath();
+      ctx.moveTo(-11, -1);
+      ctx.lineTo(9, -4);
+      ctx.lineTo(10, -7.5);
+      ctx.lineTo(-11, -4.5);
+      ctx.closePath();
+      ctx.fillStyle = light('#6B4A2C', 'left');
+      ctx.fill();
+      ctx.strokeStyle = OUTLINE;
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.ellipse(10, -5.8, 1.6, 2.1, 0, 0, Math.PI * 2);
+      ctx.fillStyle = light('#8A6339', 'top');
+      ctx.fill();
+      ctx.strokeStyle = withAlpha('#3F7A3F', 0.6);
+      ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      ctx.moveTo(-8, -5.5);
+      ctx.lineTo(2, -6.6);
+      ctx.stroke();
+      break;
+    }
+    case 4: {
+      // Reeds, for the wet ground at the water's edge.
+      for (let i = 0; i < 9; i++) {
+        const x = (rng.next() - 0.5) * 14;
+        const lean = (rng.next() - 0.5) * 6;
+        const tall = 9 + rng.next() * 9;
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.quadraticCurveTo(x + lean * 0.3, -tall * 0.6, x + lean, -tall);
+        ctx.strokeStyle = rng.next() < 0.3 ? '#A8B06A' : '#5F7F42';
+        ctx.lineWidth = 1.2;
+        ctx.lineCap = 'round';
+        ctx.stroke();
+        if (rng.next() < 0.4) {
+          ctx.beginPath();
+          ctx.ellipse(x + lean, -tall - 1.5, 1.1, 2.6, 0, 0, Math.PI * 2);
+          ctx.fillStyle = '#7A5C2E';
+          ctx.fill();
+        }
+      }
+      break;
+    }
+    case 5: {
+      // A boulder with a mossy cap.
+      groundShadow(ctx, { x: 1, y: 0 }, 13, 5, 0.3);
+      drawStone(ctx, 0, 0, 11, 8, rng);
+      ctx.beginPath();
+      ctx.ellipse(-2.5, -8.5, 6, 2.4, -0.12, 0, Math.PI * 2);
+      ctx.fillStyle = withAlpha('#4F8A42', 0.55);
+      ctx.fill();
+      break;
+    }
+    default: {
+      // A scatter of field stones.
+      groundShadow(ctx, { x: 1, y: 0 }, 10, 4, 0.24);
+      drawStone(ctx, -3, 0, 6, 4.5, rng);
+      drawStone(ctx, 5, -1, 4.5, 3.4, rng);
+      drawStone(ctx, 0, 1.5, 3.4, 2.6, rng);
+      break;
+    }
+  }
+
+  return { canvas, originX, originY };
+}
+
+/** One rounded stone, lit from the upper left. */
+function drawStone(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  radius: number,
+  height: number,
+  rng: Rng,
+): void {
+  const tone = 0.3 + rng.next() * 0.5;
+  const base = mix('#6E6960', '#A49C90', tone);
+  ctx.beginPath();
+  ctx.moveTo(x - radius, y);
+  ctx.bezierCurveTo(x - radius * 1.05, y - height * 0.8, x - radius * 0.5, y - height, x, y - height);
+  ctx.bezierCurveTo(x + radius * 0.6, y - height, x + radius * 1.05, y - height * 0.7, x + radius, y);
+  ctx.bezierCurveTo(x + radius * 0.6, y + height * 0.34, x - radius * 0.6, y + height * 0.34, x - radius, y);
   ctx.closePath();
-  ctx.fillStyle = trunk;
+  ctx.fillStyle = light(base, 'left');
   ctx.fill();
   ctx.strokeStyle = OUTLINE;
   ctx.lineWidth = 1;
   ctx.stroke();
+
+  // The shaded flank and a highlight on the crown.
   ctx.beginPath();
-  ctx.moveTo(1, -24);
-  ctx.lineTo(2.6, 0);
-  ctx.lineTo(3.5, 0);
-  ctx.lineTo(2, -26);
+  ctx.moveTo(x + radius * 0.1, y - height * 0.95);
+  ctx.bezierCurveTo(x + radius * 0.7, y - height * 0.9, x + radius * 1.05, y - height * 0.7, x + radius, y);
+  ctx.bezierCurveTo(x + radius * 0.7, y + height * 0.3, x + radius * 0.2, y + height * 0.3, x + radius * 0.1, y);
   ctx.closePath();
-  ctx.fillStyle = trunkDark;
+  ctx.fillStyle = light(base, 'right');
   ctx.fill();
 
-  const leaf =
-    variant === 3
-      ? { main: PALETTE.canopyAutumn, light: '#B99A3A', dark: '#5C4D18' }
-      : { main: PALETTE.canopy, light: PALETTE.canopyLight, dark: PALETTE.canopyDark };
-
-  if (variant === 1) {
-    // A conifer: stacked skirts.
-    for (let i = 0; i < 4; i++) {
-      const y = -26 - i * 11;
-      const spread = 20 - i * 4;
-      ctx.beginPath();
-      ctx.moveTo(-spread, y);
-      ctx.quadraticCurveTo(0, y - 6, spread, y);
-      ctx.lineTo(0, y - 20);
-      ctx.closePath();
-      ctx.fillStyle = i % 2 === 0 ? leaf.main : leaf.light;
-      ctx.fill();
-      ctx.strokeStyle = OUTLINE;
-      ctx.stroke();
-    }
-  } else {
-    // A broadleaf crown: overlapping lobes, lit from the upper left.
-    const lobes: [number, number, number][] = [
-      [-9, -34, 13],
-      [9, -32, 12],
-      [0, -46, 15],
-      [-12, -46, 10],
-      [11, -45, 10],
-      [0, -30, 14],
-    ];
-    ctx.strokeStyle = OUTLINE;
-    ctx.lineWidth = 1.2;
-    for (const [x, y, r] of lobes) {
-      ctx.beginPath();
-      ctx.arc(x, y, r, 0, Math.PI * 2);
-      ctx.fillStyle = leaf.main;
-      ctx.fill();
-      ctx.stroke();
-    }
-    // Highlight on the sunward side, shadow beneath.
-    for (const [x, y, r] of lobes) {
-      ctx.beginPath();
-      ctx.arc(x - r * 0.25, y - r * 0.3, r * 0.62, 0, Math.PI * 2);
-      ctx.fillStyle = withAlpha(leaf.light, 0.55);
-      ctx.fill();
-    }
-    ctx.beginPath();
-    ctx.arc(4, -28, 12, 0, Math.PI * 2);
-    ctx.fillStyle = withAlpha(leaf.dark, 0.4);
-    ctx.fill();
-  }
-
-  return { canvas, originX, originY };
-}
-
-// --- Roads ------------------------------------------------------------------
-
-const roadCache = new Map<number, Sprite>();
-
-/**
- * A road tile, auto-tiled from its connection mask. The mask has bits in
- * N, E, S, W order; edges without a neighbour get a kerb.
- */
-export function getRoadSprite(type: RoadType, mask: number): Sprite {
-  const key = type * 16 + mask;
-  const cached = roadCache.get(key);
-  if (cached) return cached;
-  const sprite = drawRoad(type, mask);
-  roadCache.set(key, sprite);
-  return sprite;
-}
-
-function drawRoad(type: RoadType, mask: number): Sprite {
-  const pad = 3;
-  const { canvas, ctx } = makeCanvas(TILE_WIDTH + pad * 2, TILE_HEIGHT + pad * 2);
-  const originX = TILE_WIDTH / 2 + pad;
-  const originY = TILE_HEIGHT / 2 + pad;
-  ctx.translate(originX, originY);
-
-  const diamond: Point[] = [
-    { x: 0, y: -HALF_HEIGHT },
-    { x: HALF_WIDTH, y: 0 },
-    { x: 0, y: HALF_HEIGHT },
-    { x: -HALF_WIDTH, y: 0 },
-  ];
-
-  const surface =
-    type === RoadType.Avenue ? PALETTE.flagstone : type === RoadType.Cobble ? PALETTE.cobble : PALETTE.path;
-  const surfaceLight =
-    type === RoadType.Avenue ? PALETTE.flagstoneLight : type === RoadType.Cobble ? PALETTE.cobbleLight : mix(PALETTE.path, '#FFFFFF', 0.18);
-  const surfaceDark =
-    type === RoadType.Avenue ? PALETTE.flagstoneDark : type === RoadType.Cobble ? PALETTE.cobbleDark : PALETTE.pathDark;
-
-  fillFace(ctx, diamond, surface, false);
-
-  ctx.save();
-  polygon(ctx, diamond);
-  ctx.clip();
-
-  if (type === RoadType.Path) {
-    // A packed dirt track: scattered grit, no masonry.
-    for (let i = 0; i < 26; i++) {
-      const u = hash2(i, mask, 3);
-      const v = hash2(mask, i, 5);
-      const a = lerpPoint(diamond[3], diamond[0], u);
-      const b = lerpPoint(diamond[2], diamond[1], u);
-      const point = lerpPoint(a, b, v);
-      ctx.fillStyle = i % 3 === 0 ? surfaceLight : surfaceDark;
-      ctx.fillRect(point.x, point.y, 2, 1.5);
-    }
-  } else if (type === RoadType.Avenue) {
-    // Large flagstones, laid to the diagonal of the street.
-    ctx.strokeStyle = withAlpha(surfaceDark, 0.7);
-    ctx.lineWidth = 1.2;
-    for (let i = 1; i < 4; i++) {
-      const a = lerpPoint(diamond[3], diamond[2], i / 4);
-      const b = lerpPoint(diamond[0], diamond[1], i / 4);
-      ctx.beginPath();
-      ctx.moveTo(a.x, a.y);
-      ctx.lineTo(b.x, b.y);
-      ctx.stroke();
-      const c = lerpPoint(diamond[3], diamond[0], i / 4);
-      const d = lerpPoint(diamond[2], diamond[1], i / 4);
-      ctx.beginPath();
-      ctx.moveTo(c.x, c.y);
-      ctx.lineTo(d.x, d.y);
-      ctx.stroke();
-    }
-  } else {
-    // Cobbles: small rounded stones in staggered courses.
-    for (let row = 0; row < 7; row++) {
-      for (let col = 0; col < 7; col++) {
-        const u = (row + 0.5) / 7;
-        const v = (col + 0.5 + (row % 2) * 0.3) / 7;
-        const a = lerpPoint(diamond[3], diamond[0], u);
-        const b = lerpPoint(diamond[2], diamond[1], u);
-        const point = lerpPoint(a, b, v % 1);
-        const tone = hash2(row, col, mask);
-        ctx.beginPath();
-        ctx.ellipse(point.x, point.y, 3.2, 1.8, 0, 0, Math.PI * 2);
-        ctx.fillStyle = tone > 0.66 ? surfaceLight : tone > 0.33 ? surface : surfaceDark;
-        ctx.fill();
-      }
-    }
-  }
-  ctx.restore();
-
-  // Kerbs along every edge with no road beyond it.
-  const edges: [number, Point, Point][] = [
-    [1, diamond[3], diamond[0]],
-    [2, diamond[0], diamond[1]],
-    [4, diamond[1], diamond[2]],
-    [8, diamond[2], diamond[3]],
-  ];
-  ctx.lineWidth = 1.6;
-  for (const [bit, from, to] of edges) {
-    if (mask & bit) continue;
-    ctx.strokeStyle =
-      type === RoadType.Path
-        ? withAlpha(PALETTE.pathDark, 0.55)
-        : withAlpha(type === RoadType.Avenue ? PALETTE.flagstoneDark : PALETTE.cobbleDark, 0.6);
-    ctx.beginPath();
-    ctx.moveTo(from.x, from.y);
-    ctx.lineTo(to.x, to.y);
-    ctx.stroke();
-  }
-
-  return { canvas, originX, originY };
+  ctx.beginPath();
+  ctx.ellipse(x - radius * 0.28, y - height * 0.66, radius * 0.4, height * 0.24, -0.2, 0, Math.PI * 2);
+  ctx.fillStyle = withAlpha(light(base, 'bright'), 0.7);
+  ctx.fill();
 }
 
 // --- The curtain wall -------------------------------------------------------
@@ -259,12 +475,12 @@ export function getWallSprite(kind: WallKind, mask: number, orientation: number)
   return sprite;
 }
 
-const WALL_HEIGHT = 34;
+const WALL_HEIGHT = 40;
 const TOWER_HEIGHT = 54;
 
 function drawWall(kind: WallKind, mask: number, orientation: number): Sprite {
-  const pad = 12;
-  const total = kind === 'tower' ? TOWER_HEIGHT + 40 : kind === 'gate' ? WALL_HEIGHT + 40 : WALL_HEIGHT + 22;
+  const pad = 16;
+  const total = kind === 'tower' ? TOWER_HEIGHT + 62 : kind === 'gate' ? WALL_HEIGHT + 40 : WALL_HEIGHT + 22;
   const { canvas, ctx } = makeCanvas(TILE_WIDTH + pad * 2, TILE_HEIGHT + total + pad * 2);
   const originX = TILE_WIDTH / 2 + pad;
   const originY = total + pad + TILE_HEIGHT / 2;
@@ -298,63 +514,89 @@ function tilePoint(u: number, v: number): Point {
   return { x: (u - v) * HALF_WIDTH, y: (u + v - 1) * HALF_HEIGHT };
 }
 
+const STONE_SKIN: Skin = { material: 'whitestone', color: PALETTE.stoneLight };
+const PARAPET_SKIN: Skin = { material: 'whitestone', color: PALETTE.stoneLight };
+const SLATE_SKIN: Skin = { material: 'slate', color: PALETTE.roofBlue };
+
 /**
- * A length of curtain wall: a narrow crenellated block running along the
- * direction the wall travels, so successive tiles read as one continuous
- * rampart rather than a row of separate slabs.
+ * A length of curtain wall: a crenellated rampart of dressed stone running
+ * along the direction the wall travels, so successive tiles read as one
+ * continuous defence rather than a row of separate slabs.
  */
 function drawWallRun(ctx: CanvasRenderingContext2D, corners: Point[], mask: number): void {
   void corners;
   const runsNorthSouth = (mask & 0b0101) !== 0;
-  const thin = 0.26;
-  const fat = 0.74;
+  const thin = 0.3;
+  const fat = 0.7;
   // Overlap the tile edges very slightly so no seam shows between segments.
   const over = -0.03;
   const end = 1.03;
 
-  // Footprint corners in [north, east, south, west] order.
   const footprint: Point[] = runsNorthSouth
     ? [tilePoint(thin, over), tilePoint(fat, over), tilePoint(fat, end), tilePoint(thin, end)]
     : [tilePoint(over, thin), tilePoint(end, thin), tilePoint(end, fat), tilePoint(over, fat)];
 
-  const colors = boxColors(PALETTE.stoneLight);
-  const top = isoBox(ctx, footprint, WALL_HEIGHT, colors);
+  castShadow(ctx, footprint, WALL_HEIGHT, 0.16);
 
-  // Coursed stone on the face the viewer sees.
-  drawMasonry(ctx, [top[1], top[2], footprint[2], footprint[1]], WALL_HEIGHT);
-  drawMasonry(ctx, [top[3], top[2], footprint[2], footprint[3]], WALL_HEIGHT);
+  // A battered plinth, then the rampart itself: the taper reads as weight.
+  const plinth = isoBox(ctx, expandFootprint(footprint, 2.5), 7, {
+    material: 'granite',
+    color: PALETTE.stoneMid,
+  }, false);
+  const top = isoBox(ctx, plinth, WALL_HEIGHT - 7, { ...STONE_SKIN, seed: mask });
 
-  // An arrow slit facing out of the city.
-  const slitBase = runsNorthSouth ? lerpPoint(top[1], top[2], 0.5) : lerpPoint(top[3], top[2], 0.5);
-  ctx.fillStyle = 'rgba(32, 26, 18, 0.72)';
-  ctx.fillRect(slitBase.x - 1.2, slitBase.y + WALL_HEIGHT * 0.32, 2.4, 9);
+  // A string course marking the wall walk.
+  const band = runsNorthSouth ? [top[1], top[2]] : [top[3], top[2]];
+  ctx.strokeStyle = withAlpha(PALETTE.stoneMid, 0.8);
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(band[0].x, band[0].y + 5);
+  ctx.lineTo(band[1].x, band[1].y + 5);
+  ctx.stroke();
+  ctx.strokeStyle = withAlpha('#FFF6E0', 0.28);
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(band[0].x, band[0].y + 3.4);
+  ctx.lineTo(band[1].x, band[1].y + 3.4);
+  ctx.stroke();
 
+  drawArrowSlit(ctx, runsNorthSouth ? lerpPoint(top[1], top[2], 0.5) : lerpPoint(top[3], top[2], 0.5));
   drawMerlons(ctx, top, runsNorthSouth, 3);
+}
+
+/** A cross-shaped loophole, cut deep enough to read as an opening. */
+function drawArrowSlit(ctx: CanvasRenderingContext2D, base: Point): void {
+  ctx.save();
+  // A splayed reveal in the stone, with the dark of the loophole inside it.
+  ctx.fillStyle = withAlpha('#FFF6E0', 0.22);
+  ctx.fillRect(base.x - 2.2, base.y + WALL_HEIGHT * 0.34 - 1, 4.4, 12);
+  ctx.fillStyle = 'rgba(24, 22, 18, 0.85)';
+  ctx.fillRect(base.x - 0.9, base.y + WALL_HEIGHT * 0.34, 1.8, 10);
+  ctx.restore();
 }
 
 /**
  * Crenellations standing on a wall's walkway. Each merlon is a little
- * isometric block cut from the top face, so they sit on the parapet
- * instead of floating beside it.
+ * isometric block of the same dressed stone, cut from the top face so they
+ * sit on the parapet rather than floating beside it.
  */
 function drawMerlons(
   ctx: CanvasRenderingContext2D,
   top: Point[],
   runsNorthSouth: boolean,
   count: number,
-  height = 9,
+  height = 7,
 ): void {
   const [north, east, south, west] = top;
-  // The two edges the merlons march along, and the half-width of each block.
   const edgeA: [Point, Point] = runsNorthSouth ? [north, west] : [north, east];
   const edgeB: [Point, Point] = runsNorthSouth ? [east, south] : [west, south];
-  const half = 0.5 / (count * 2);
-  const colors = boxColors(PALETTE.stoneLight);
+  // Merlons take a little under half of each bay, leaving a proper embrasure.
+  const half = 0.26 / count;
 
   for (let i = 0; i < count; i++) {
     const centre = (i + 0.5) / count;
-    const from = Math.max(0, centre - half * 2);
-    const to = Math.min(1, centre + half * 2);
+    const from = Math.max(0, centre - half);
+    const to = Math.min(1, centre + half);
     const block: Point[] = runsNorthSouth
       ? [
           lerpPoint(edgeA[0], edgeA[1], from),
@@ -368,101 +610,116 @@ function drawMerlons(
           lerpPoint(edgeB[0], edgeB[1], to),
           lerpPoint(edgeB[0], edgeB[1], from),
         ];
-    isoBox(ctx, block, height, colors);
+    isoBox(ctx, block, height, { ...PARAPET_SKIN, seed: i * 7 });
   }
 }
 
-/** A round tower with a blue conical cap, as on Stormwind's outer wall. */
+/** Push a footprint outward, for plinths and batters. */
+function expandFootprint(points: Point[], amount: number): Point[] {
+  let cx = 0;
+  let cy = 0;
+  for (const point of points) {
+    cx += point.x / points.length;
+    cy += point.y / points.length;
+  }
+  return points.map((point) => {
+    const dx = point.x - cx;
+    const dy = point.y - cy;
+    const length = Math.hypot(dx, dy) || 1;
+    return { x: point.x + (dx / length) * amount, y: point.y + (dy / length) * amount };
+  });
+}
+
+/** A round tower with a blue slate cap, as on Stormwind's outer wall. */
 function drawWallTower(ctx: CanvasRenderingContext2D, corners: Point[]): void {
   void corners;
   const radiusX = 21;
   const radiusY = 10;
   const height = TOWER_HEIGHT;
 
-  // Body.
-  ctx.beginPath();
-  ctx.moveTo(-radiusX, -height);
-  ctx.lineTo(-radiusX, 0);
-  ctx.ellipse(0, 0, radiusX, radiusY, 0, Math.PI, 0, false);
-  ctx.lineTo(radiusX, -height);
-  ctx.closePath();
-  ctx.fillStyle = shade(PALETTE.stoneLight, -0.16);
-  ctx.fill();
-  ctx.strokeStyle = OUTLINE;
-  ctx.lineWidth = 1.2;
-  ctx.stroke();
+  castShadow(
+    ctx,
+    [
+      { x: -radiusX, y: -radiusY },
+      { x: radiusX, y: -radiusY },
+      { x: radiusX, y: radiusY },
+      { x: -radiusX, y: radiusY },
+    ],
+    height,
+    0.18,
+  );
 
-  ctx.beginPath();
-  ctx.moveTo(-radiusX, -height);
-  ctx.lineTo(-radiusX, 0);
-  ctx.lineTo(-radiusX * 0.25, radiusY * 0.92);
-  ctx.lineTo(-radiusX * 0.25, -height + radiusY * 0.92);
-  ctx.closePath();
-  ctx.fillStyle = PALETTE.stoneLight;
-  ctx.fill();
+  // Battered base, drum, then the parapet it carries.
+  cylinder(ctx, { x: 0, y: 2 }, radiusX + 2.5, radiusY + 1.2, 9, {
+    material: 'granite',
+    color: PALETTE.stoneMid,
+  });
+  cylinder(ctx, { x: 0, y: -6 }, radiusX, radiusY, height - 12, { ...STONE_SKIN, seed: 3 });
 
-  // Courses of stone.
-  ctx.strokeStyle = withAlpha(PALETTE.stoneMid, 0.6);
-  ctx.lineWidth = 1;
-  for (let i = 1; i < 6; i++) {
-    const y = -height + (height / 6) * i;
-    ctx.beginPath();
-    ctx.ellipse(0, y, radiusX, radiusY, 0, 0.15, Math.PI - 0.15);
-    ctx.stroke();
-  }
-
-  // Crenellated parapet, then the roof.
-  ctx.beginPath();
-  ctx.ellipse(0, -height, radiusX + 3, radiusY + 1.5, 0, 0, Math.PI * 2);
-  ctx.fillStyle = PALETTE.stone;
-  ctx.fill();
-  ctx.strokeStyle = OUTLINE;
-  ctx.stroke();
-  for (let i = 0; i < 7; i++) {
-    const angle = (i / 7) * Math.PI * 2;
+  // Corbels under the parapet, the way a real machicolation is carried.
+  const capY = -height - 4;
+  for (let i = 0; i < 9; i++) {
+    const angle = Math.PI + (i / 8) * Math.PI;
     const x = Math.cos(angle) * (radiusX + 1);
-    const y = -height + Math.sin(angle) * (radiusY + 1);
-    if (Math.sin(angle) < -0.75) continue;
+    const y = capY + 8 + Math.sin(angle) * (radiusY + 0.6);
     ctx.beginPath();
-    ctx.rect(x - 3.5, y - 8, 7, 8);
-    ctx.fillStyle = PALETTE.stoneLight;
+    ctx.moveTo(x - 2.4, y);
+    ctx.lineTo(x + 2.4, y);
+    ctx.lineTo(x + 1.4, y + 4.5);
+    ctx.lineTo(x - 1.4, y + 4.5);
+    ctx.closePath();
+    ctx.fillStyle = light(PALETTE.stoneMid, 'right');
     ctx.fill();
-    ctx.strokeStyle = OUTLINE;
-    ctx.stroke();
   }
 
-  const capBase = -height - 6;
-  ctx.beginPath();
-  ctx.moveTo(-radiusX * 0.82, capBase);
-  ctx.lineTo(0, capBase - 26);
-  ctx.lineTo(radiusX * 0.82, capBase);
-  ctx.closePath();
-  ctx.fillStyle = PALETTE.roofBlue;
-  ctx.fill();
-  ctx.strokeStyle = OUTLINE;
-  ctx.stroke();
-  ctx.beginPath();
-  ctx.moveTo(-radiusX * 0.82, capBase);
-  ctx.lineTo(0, capBase - 26);
-  ctx.lineTo(-radiusX * 0.18, capBase);
-  ctx.closePath();
-  ctx.fillStyle = PALETTE.roofBlueLight;
-  ctx.fill();
+  cylinder(ctx, { x: 0, y: capY + 9 }, radiusX + 3, radiusY + 1.6, 9, { ...PARAPET_SKIN, seed: 11 });
 
-  // The lion's pennant.
+  // Crenellations round the rim.
+  for (let i = 0; i < 8; i++) {
+    const angle = Math.PI + ((i + 0.5) / 8) * Math.PI;
+    const x = Math.cos(angle) * (radiusX + 1.5);
+    const y = capY + Math.sin(angle) * (radiusY + 1) - 0.5;
+    const facing = Math.cos(angle + Math.PI * 0.25);
+    paintFace(
+      ctx,
+      [
+        { x: x - 3.4, y: y - 7 },
+        { x: x + 3.4, y: y - 7 },
+        { x: x + 3.4, y },
+        { x: x - 3.4, y },
+      ],
+      'whitestone',
+      PALETTE.stoneLight,
+      { surface: facing > 0.3 ? 'bright' : facing > -0.3 ? 'left' : 'right', seed: i },
+    );
+    ctx.strokeStyle = OUTLINE;
+    ctx.lineWidth = 0.9;
+    ctx.strokeRect(x - 3.4, y - 7, 6.8, 7);
+  }
+
+  // The slate cap and the lion's pennant above it.
+  const roofBase = capY - 5;
+  coneRoof(ctx, { x: 0, y: roofBase }, radiusX * 0.84, radiusY * 0.6, 28, { ...SLATE_SKIN, seed: 5 });
+
   ctx.strokeStyle = PALETTE.stoneDark;
   ctx.lineWidth = 1.4;
   ctx.beginPath();
-  ctx.moveTo(0, capBase - 26);
-  ctx.lineTo(0, capBase - 38);
+  ctx.moveTo(0, roofBase - 28);
+  ctx.lineTo(0, roofBase - 40);
   ctx.stroke();
   ctx.beginPath();
-  ctx.moveTo(0, capBase - 38);
-  ctx.lineTo(11, capBase - 34);
-  ctx.lineTo(0, capBase - 30);
+  ctx.moveTo(0, roofBase - 40);
+  ctx.lineTo(11, roofBase - 36);
+  ctx.lineTo(0, roofBase - 32);
   ctx.closePath();
-  ctx.fillStyle = PALETTE.gold;
+  ctx.fillStyle = light(PALETTE.gold, 'left');
   ctx.fill();
+  ctx.strokeStyle = OUTLINE;
+  ctx.lineWidth = 0.9;
+  ctx.stroke();
+
+  // A lit arrow slit facing the viewer.
+  drawArrowSlit(ctx, { x: 0, y: -height * 0.72 });
 }
 
 /**
@@ -471,8 +728,6 @@ function drawWallTower(ctx: CanvasRenderingContext2D, corners: Point[]): void {
  */
 function drawGatehouse(ctx: CanvasRenderingContext2D, corners: Point[], orientation: number): void {
   void corners;
-  // Orientation 0 means the road runs north-south, so the blocks flank it
-  // to east and west; orientation 1 is the other way about.
   const passageRunsNorthSouth = orientation === 0;
   const height = WALL_HEIGHT + 6;
   const outer = -0.03;
@@ -488,30 +743,26 @@ function drawGatehouse(ctx: CanvasRenderingContext2D, corners: Point[], orientat
         [tilePoint(outer, 1 - inner), tilePoint(1.03, 1 - inner), tilePoint(1.03, 1.03), tilePoint(outer, 1.03)],
       ];
 
-  // The far block, then the arch over the road, then the near block, so the
-  // painter's order matches what a viewer would actually see.
-  const colors = boxColors(PALETTE.stoneLight);
   const farBlock = blocks[0];
   const nearBlock = blocks[1];
+  castShadow(ctx, [...farBlock, ...nearBlock], height, 0.16);
 
-  const farTop = isoBox(ctx, farBlock, height, colors);
+  const farTop = isoBox(ctx, farBlock, height, { ...STONE_SKIN, seed: 17 });
   drawMerlons(ctx, farTop, passageRunsNorthSouth, 2, 8);
 
   drawGateArch(ctx, passageRunsNorthSouth, height);
 
-  const nearTop = isoBox(ctx, nearBlock, height, colors);
-  drawMasonry(ctx, [nearTop[1], nearTop[2], nearBlock[2], nearBlock[1]], height);
-  drawMasonry(ctx, [nearTop[3], nearTop[2], nearBlock[2], nearBlock[3]], height);
+  const nearTop = isoBox(ctx, nearBlock, height, { ...STONE_SKIN, seed: 23 });
   drawMerlons(ctx, nearTop, passageRunsNorthSouth, 2, 8);
 
   // The lion banner hung between the two blocks.
   const bannerAnchor = passageRunsNorthSouth ? tilePoint(0.5, 0.92) : tilePoint(0.92, 0.5);
-  ctx.fillStyle = PALETTE.alliance;
+  ctx.fillStyle = light(PALETTE.alliance, 'left');
   ctx.fillRect(bannerAnchor.x - 5, bannerAnchor.y - height - 2, 10, 15);
   ctx.strokeStyle = OUTLINE;
   ctx.lineWidth = 1;
   ctx.strokeRect(bannerAnchor.x - 5, bannerAnchor.y - height - 2, 10, 15);
-  ctx.fillStyle = PALETTE.gold;
+  ctx.fillStyle = light(PALETTE.gold, 'top');
   ctx.fillRect(bannerAnchor.x - 5, bannerAnchor.y - height - 2, 10, 2.5);
 }
 
@@ -521,14 +772,12 @@ function drawGateArch(ctx: CanvasRenderingContext2D, passageRunsNorthSouth: bool
     ? [tilePoint(0.3, -0.03), tilePoint(0.7, -0.03), tilePoint(0.7, 1.03), tilePoint(0.3, 1.03)]
     : [tilePoint(-0.03, 0.3), tilePoint(1.03, 0.3), tilePoint(1.03, 0.7), tilePoint(-0.03, 0.7)];
 
-  // The span sits on top, leaving an opening beneath it for the road.
   const lift = height * 0.55;
   const raised = span.map((point) => ({ x: point.x, y: point.y - lift }));
-  const colors = boxColors(PALETTE.stone);
-  const top = isoBox(ctx, raised, height - lift, colors);
+  const top = isoBox(ctx, raised, height - lift, { material: 'whitestone', color: PALETTE.stone, seed: 31 });
   drawMerlons(ctx, top, passageRunsNorthSouth, 2, 8);
 
-  // The dark of the passage, and the portcullis across it.
+  // The dark of the passage, with voussoirs round its head.
   const mouth = passageRunsNorthSouth ? lerpPoint(span[1], span[2], 0.5) : lerpPoint(span[3], span[2], 0.5);
   ctx.beginPath();
   ctx.moveTo(mouth.x - 11, mouth.y);
@@ -536,37 +785,36 @@ function drawGateArch(ctx: CanvasRenderingContext2D, passageRunsNorthSouth: bool
   ctx.arc(mouth.x, mouth.y - lift * 0.55, 11, Math.PI, 0);
   ctx.lineTo(mouth.x + 11, mouth.y);
   ctx.closePath();
-  ctx.fillStyle = 'rgba(28, 22, 15, 0.85)';
+  ctx.fillStyle = 'rgba(24, 20, 15, 0.9)';
   ctx.fill();
 
-  ctx.strokeStyle = withAlpha(PALETTE.timberDark, 0.75);
-  ctx.lineWidth = 1.3;
+  ctx.strokeStyle = withAlpha(PALETTE.stoneMid, 0.9);
+  ctx.lineWidth = 2.4;
+  ctx.beginPath();
+  ctx.arc(mouth.x, mouth.y - lift * 0.55, 12.4, Math.PI, 0);
+  ctx.stroke();
+  ctx.strokeStyle = withAlpha('#FFF6E0', 0.3);
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.arc(mouth.x, mouth.y - lift * 0.55, 13.6, Math.PI * 1.05, Math.PI * 1.7);
+  ctx.stroke();
+
+  // The portcullis, raised.
+  ctx.strokeStyle = withAlpha(PALETTE.timberDark, 0.8);
+  ctx.lineWidth = 1.4;
   for (let i = -2; i <= 2; i++) {
     ctx.beginPath();
-    ctx.moveTo(mouth.x + i * 4.5, mouth.y);
-    ctx.lineTo(mouth.x + i * 4.5, mouth.y - lift * 0.75);
+    ctx.moveTo(mouth.x + i * 4.5, mouth.y - lift * 0.2);
+    ctx.lineTo(mouth.x + i * 4.5, mouth.y - lift * 0.78);
     ctx.stroke();
   }
-}
-
-/** Faint coursing lines, which is what sells stone at this scale. */
-function drawMasonry(ctx: CanvasRenderingContext2D, face: Point[], height: number): void {
-  ctx.save();
-  polygon(ctx, face);
-  ctx.clip();
-  ctx.strokeStyle = withAlpha(PALETTE.stoneMid, 0.55);
-  ctx.lineWidth = 1;
-  const courses = 5;
-  for (let i = 1; i < courses; i++) {
-    const a = lerpPoint(face[0], face[3], i / courses);
-    const b = lerpPoint(face[1], face[2], i / courses);
+  for (const level of [0.4, 0.62]) {
     ctx.beginPath();
-    ctx.moveTo(a.x, a.y);
-    ctx.lineTo(b.x, b.y);
+    ctx.moveTo(mouth.x - 9, mouth.y - lift * level);
+    ctx.lineTo(mouth.x + 9, mouth.y - lift * level);
     ctx.stroke();
   }
-  void height;
-  ctx.restore();
+  void strokeSilhouette;
 }
 
 // --- People and carts -------------------------------------------------------
@@ -828,7 +1076,6 @@ function drawCart(variant: number, direction: number): Sprite {
 /** Drop every cached sprite, e.g. when the device pixel ratio changes. */
 export function clearPropCaches(): void {
   treeCache.length = 0;
-  roadCache.clear();
   wallCache.clear();
   agentCache.clear();
 }
