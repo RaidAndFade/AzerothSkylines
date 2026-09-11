@@ -739,7 +739,7 @@ export function treesOnTile(
   const density = map.treeDensity[index(map, x, y)] ?? 0;
   if (density <= 0.02) return [];
   const roll = hash2(x, y, map.seed);
-  const count = density > 0.7 ? 3 : density > 0.4 ? 2 : roll < density * 2 ? 1 : 0;
+  const count = density > 0.82 ? 3 : density > 0.5 ? 2 : roll < density * 2.2 ? 1 : 0;
   const trees: { ox: number; oy: number; scale: number; variant: number }[] = [];
   for (let i = 0; i < count; i++) {
     const a = hash2(x * 7 + i, y * 13 + i * 3, map.seed ^ 0x5bf03635);
@@ -748,10 +748,58 @@ export function treesOnTile(
     trees.push({
       ox: (a - 0.5) * 0.78,
       oy: (b - 0.5) * 0.78,
-      scale: 0.78 + c * 0.45,
-      // Elwynn is overwhelmingly green; a turning maple is the rare one.
-      variant: c < 0.44 ? 0 : c < 0.7 ? 1 : c < 0.88 ? 2 : 3,
+      scale: 0.68 + c * 0.62,
+      // Elwynn is oak country: pine, birch and scrub fill in between, and a
+      // maple on the turn is the rare one.
+      variant: c < 0.36 ? 0 : c < 0.58 ? 1 : c < 0.73 ? 2 : c < 0.8 ? 3 : c < 0.92 ? 4 : 5,
     });
   }
   return trees;
+}
+
+/**
+ * The small things that make open ground look lived in: stones, flowers,
+ * tufts of grass, fallen wood, reeds at the water's edge. Placed the same
+ * deterministic way as trees, so they never shift between frames.
+ */
+export function propsOnTile(
+  map: WorldMap,
+  x: number,
+  y: number,
+): { ox: number; oy: number; scale: number; variant: number }[] {
+  if (!inBounds(map, x, y)) return [];
+  const i = index(map, x, y);
+  const terrain = map.terrain[i] as Terrain;
+  if (isWater(terrain) || terrain === Terrain.Snow) return [];
+
+  // Woodland floor is already busy with trunks; open ground gets the detail.
+  const canopy = map.treeDensity[i];
+  const roll = hash2(x, y, map.seed ^ 0x3f21b7);
+  const density = terrain === Terrain.Rock ? 0.5 : 0.34 - canopy * 0.28;
+  if (roll > density) return [];
+
+  const count = roll < density * 0.35 ? 2 : 1;
+  const out: { ox: number; oy: number; scale: number; variant: number }[] = [];
+  for (let n = 0; n < count; n++) {
+    const a = hash2(x * 31 + n, y * 17 + n * 5, map.seed ^ 0x11f3);
+    const b = hash2(x * 13 + n * 7, y * 41 + n, map.seed ^ 0x77c1);
+    const c = hash2(x + n * 211, y + n * 97, map.seed ^ 0x2ab9);
+
+    let variant: number;
+    if (terrain === Terrain.Rock) variant = c < 0.6 ? 0 : 5;
+    else if (terrain === Terrain.Sand) variant = c < 0.5 ? 4 : 0;
+    else if (map.moisture[i] > 0.62 && c < 0.3) variant = 4;
+    else if (c < 0.3) variant = 1;
+    else if (c < 0.62) variant = 2;
+    else if (c < 0.82) variant = 0;
+    else variant = 3;
+
+    out.push({
+      ox: (a - 0.5) * 0.8,
+      oy: (b - 0.5) * 0.8,
+      scale: 0.8 + c * 0.4,
+      variant,
+    });
+  }
+  return out;
 }
