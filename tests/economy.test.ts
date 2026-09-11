@@ -1,11 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import { RoadType } from '@/sim/types';
-import { createBuilding, registerBuilding, tileIndex } from '@/sim/city';
+import { buildingTiles, createBuilding, registerBuilding, tileIndex } from '@/sim/city';
 import {
   DAYS_PER_MONTH,
   MONTHS_PER_YEAR,
+  TAX_PER_RESIDENT,
   advanceCalendar,
   collectTaxes,
+  ratedLandValue,
   settleMonth,
   totalUpkeep,
 } from '@/sim/economy';
@@ -69,6 +71,26 @@ describe('taxes', () => {
     expect(taxes.industrial).toBe(0);
   });
 
+  it('rates a large building on its whole footprint, not its anchor corner', () => {
+    const city = makeFlatCity();
+    const y = mainRoadY();
+    const manor = createBuilding(city, 'house4', 4, y + 1);
+    manor.residents = 20;
+    manor.connected = true;
+    registerBuilding(city, manor);
+
+    // A gradient running across the manor: cheap at the anchor, dear beyond it.
+    city.landValue.fill(0);
+    for (const tile of buildingTiles(manor)) {
+      city.landValue[tileIndex(city, tile.x, tile.y)] = tile.x === manor.x && tile.y === manor.y ? 0 : 1;
+    }
+
+    expect(ratedLandValue(city, manor)).toBeCloseTo(0.75, 5);
+    // Taxed on the corner alone the multiplier would be 0.65; on the mean it is higher.
+    const anchorOnly = manor.residents * TAX_PER_RESIDENT * city.budget.taxRateResidential * 0.65;
+    expect(collectTaxes(city).residential).toBeGreaterThan(anchorOnly);
+  });
+
   it('collects less from a shop with empty shelves', () => {
     const { city, shop } = cityWithTaxpayers();
     const stocked = collectTaxes(city).commercial;
@@ -126,6 +148,36 @@ describe('monthly settlement', () => {
     );
     expect(city.budget.lastTrade).toBe(120);
     expect(city.budget.tradeAccumulator).toBe(0);
+  });
+
+  it('does not pay the trade balance a second time at settlement', () => {
+    // tradeWithWorld already moved this gold when the caravans arrived; the
+    // accumulator only mirrors it for the ledger. Settling must not re-credit it.
+    const { city } = cityWithTaxpayers();
+    const before = city.budget.gold;
+    city.budget.tradeAccumulator = 500;
+    const statement = settleMonth(city);
+    expect(city.budget.gold).toBeCloseTo(
+      before + statement.residentialTax + statement.commercialTax + statement.industrialTax -
+        statement.buildingUpkeep - statement.roadUpkeep - statement.wallUpkeep,
+      5,
+    );
+    expect(statement.trade).toBe(500);
+  });
+
+  it("reports a net that matches the month's whole movement in gold", () => {
+    const { city } = cityWithTaxpayers();
+    const opening = city.budget.gold;
+
+    // A month of trading: the world pays the city day by day.
+    for (let day = 0; day < DAYS_PER_MONTH; day++) {
+      const takings = 40 - day;
+      city.budget.gold += takings;
+      city.budget.tradeAccumulator += takings;
+    }
+
+    const statement = settleMonth(city);
+    expect(city.budget.gold - opening).toBeCloseTo(statement.net, 5);
   });
 
   it('warns the journal when the treasury runs dry', () => {
