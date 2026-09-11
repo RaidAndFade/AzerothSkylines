@@ -4,7 +4,7 @@
  */
 import { clamp, clamp01, lerp } from '../core/math';
 import { Service, Terrain, RoadType, isWater } from './types';
-import { CityState, buildingCenter, tileIndex } from './city';
+import { CityState, buildingCenter, tileIndex, treeDensityAt } from './city';
 import { getDef } from '../data/buildings';
 import { MAX_ELEVATION } from './terrain';
 
@@ -147,8 +147,10 @@ export function computeLandValue(city: CityState): void {
       }
 
       // Natural amenity: a view over water, old trees, gentle high ground.
+      // Trees only count where they still stand — ground the city holds was
+      // cleared to build on, so it collects no bonus from a felled forest.
       let natural = 0.3;
-      natural += city.map.treeDensity[i] * 0.12;
+      natural += treeDensityAt(city, x, y) * 0.12;
       natural += (city.map.elevation[i] / MAX_ELEVATION) * 0.09;
       if (nearWater(city, x, y, 4)) natural += 0.12;
 

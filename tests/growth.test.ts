@@ -100,7 +100,17 @@ describe('choosing an industry', () => {
     city.map.fertility.fill(0.1);
     city.map.treeDensity.fill(1);
     city.map.oreRichness.fill(0);
-    expect(chooseIndustryLine(city, 6, 6)).toBe('timber');
+    // Out past the owned block, where the forest is still standing.
+    expect(chooseIndustryLine(city, 24, 24)).toBe('timber');
+  });
+
+  it('will not log a forest the city has already felled', () => {
+    const city = makeFlatCity();
+    city.map.fertility.fill(0.1);
+    city.map.treeDensity.fill(1);
+    city.map.oreRichness.fill(0);
+    // Same land, but inside the walls: the canopy came down with the wall.
+    expect(chooseIndustryLine(city, 6, 6)).not.toBe('timber');
   });
 
   it('turns ore-rich stone to mining', () => {

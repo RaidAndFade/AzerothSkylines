@@ -727,20 +727,27 @@ function levelRoadCorridor(map: WorldMap, road: Point[]): void {
   }
 }
 
+/** One drawn tree, placed within its tile. */
+export interface TileTree {
+  ox: number;
+  oy: number;
+  scale: number;
+  variant: number;
+}
+
 /**
  * Deterministic tree placement for a tile. Returns up to three trees with
  * stable sub-tile offsets so foliage never shimmers between frames.
+ *
+ * This is the canopy the *land* carries. What still stands on it once the
+ * city holds the ground is `standingTreesOnTile` in `./city`.
  */
-export function treesOnTile(
-  map: WorldMap,
-  x: number,
-  y: number,
-): { ox: number; oy: number; scale: number; variant: number }[] {
+export function treesOnTile(map: WorldMap, x: number, y: number): TileTree[] {
   const density = map.treeDensity[index(map, x, y)] ?? 0;
   if (density <= 0.02) return [];
   const roll = hash2(x, y, map.seed);
   const count = density > 0.7 ? 3 : density > 0.4 ? 2 : roll < density * 2 ? 1 : 0;
-  const trees: { ox: number; oy: number; scale: number; variant: number }[] = [];
+  const trees: TileTree[] = [];
   for (let i = 0; i < count; i++) {
     const a = hash2(x * 7 + i, y * 13 + i * 3, map.seed ^ 0x5bf03635);
     const b = hash2(x * 17 + i * 5, y * 29 + i, map.seed ^ 0x1b873593);

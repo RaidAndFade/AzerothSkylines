@@ -12,8 +12,7 @@ import { DETAIL_ZOOM, TileRange, ViewRect, drawTerrain, strokeTile, strokeTileRe
 import { getBuildingSprite } from './buildingSprites';
 import { getAgentSprite, getRoadSprite, getTreeSprite, getWallSprite } from './propSprites';
 import { AgentKind, RoadType, Service, Terrain, Zone, isWater } from '../sim/types';
-import { CityState, PARCEL_SIZE, tileIndex } from '../sim/city';
-import { treesOnTile } from '../sim/terrain';
+import { CityState, PARCEL_SIZE, standingTreesOnTile, tileIndex } from '../sim/city';
 import { roadConnectionMask } from '../sim/roads';
 import { getDef } from '../data/buildings';
 
@@ -184,8 +183,9 @@ export class Renderer {
             }
           }
         } else if (drawDetail && road === RoadType.None && wallIndex < 0) {
-          // Woodland, but only where nothing has been built.
-          for (const tree of treesOnTile(city.map, x, y)) {
+          // Woodland, but only where nothing has been built and the city has
+          // not already cleared the ground to take it.
+          for (const tree of standingTreesOnTile(city, x, y)) {
             const sprite = getTreeSprite(tree.variant);
             ctx.save();
             ctx.translate(cx + tree.ox * HALF_WIDTH, cy + tree.oy * HALF_HEIGHT);

@@ -1,6 +1,6 @@
 /** The root city state and the tile helpers every system shares. */
 import { Rng } from '../core/rng';
-import { WorldMap, generateWorld, isTileBuildable } from './terrain';
+import { TileTree, WorldMap, generateWorld, isTileBuildable, treesOnTile } from './terrain';
 import {
   ALL_GOODS,
   ALL_SERVICES,
@@ -296,6 +296,30 @@ export function parcelForTile(city: CityState, x: number, y: number): Parcel | n
 export function isTileOwned(city: CityState, x: number, y: number): boolean {
   if (!inCity(city, x, y)) return false;
   return parcelForTile(city, x, y)?.owned ?? false;
+}
+
+/** Nothing stands on a tile that has been cleared; shared to avoid churn. */
+const NO_TREES: readonly TileTree[] = [];
+
+/**
+ * The canopy actually standing on a tile.
+ *
+ * Claiming ground clears it: the founding district is felled when the city
+ * is founded, and every parcel annexed afterwards is felled as the walls go
+ * round it. That is derived from ownership rather than written back into
+ * `map.treeDensity`, because the valley is a pure function of the seed and
+ * is never saved (see `./save`) — a mutated canopy would grow back on load.
+ */
+export function treeDensityAt(city: CityState, x: number, y: number): number {
+  if (!inCity(city, x, y)) return 0;
+  if (parcelForTile(city, x, y)?.owned) return 0;
+  return city.map.treeDensity[tileIndex(city, x, y)];
+}
+
+/** The trees to draw on a tile: none where the city has felled them. */
+export function standingTreesOnTile(city: CityState, x: number, y: number): readonly TileTree[] {
+  if (treeDensityAt(city, x, y) <= 0.02) return NO_TREES;
+  return treesOnTile(city.map, x, y);
 }
 
 /** A parcel is worth settling if enough of it is dry, buildable ground. */
