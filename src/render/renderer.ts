@@ -2,16 +2,17 @@
  * The scene renderer.
  *
  * Ground is painted first as batched diamonds, then everything that stands
- * on it is drawn front to back along isometric diagonals, so a cottage
- * correctly hides the hedge behind it and the wall hides the cottage.
+ * on it is gathered into one list, sorted by depth and drawn nearest last,
+ * so a cottage correctly hides the hedge behind it and the wall hides the
+ * cottage.
  */
-import { ELEVATION_STEP, HALF_HEIGHT, HALF_WIDTH } from './iso';
+import { ELEVATION_STEP, HALF_HEIGHT, HALF_WIDTH, depthOf } from './iso';
 import { PALETTE, mix, withAlpha } from './palette';
 import { Camera } from './camera';
 import { DETAIL_ZOOM, TileRange, ViewRect, drawTerrain, strokeTile, strokeTileRect } from './terrainLayer';
 import { getBuildingSprite } from './buildingSprites';
-import { getAgentSprite, getRoadSprite, getTreeSprite, getWallSprite } from './propSprites';
-import { AgentKind, RoadType, Service, Terrain, Zone, isWater } from '../sim/types';
+import { Sprite, getAgentSprite, getRoadSprite, getTreeSprite, getWallSprite } from './propSprites';
+import { AgentKind, Building, RoadType, Service, Terrain, Zone, isWater } from '../sim/types';
 import { CityState, PARCEL_SIZE, tileIndex } from '../sim/city';
 import { treesOnTile } from '../sim/terrain';
 import { roadConnectionMask } from '../sim/roads';
@@ -51,6 +52,88 @@ export interface RenderOptions {
 const SKY_TOP = '#7FB3D9';
 const SKY_BOTTOM = '#CFE4EE';
 
+/**
+ * One sprite to paint, with the depth it sorts at.
+ *
+ * Depth is an explicit function of world position, height and footprint
+ * rather than something the loop nesting happens to produce, so buildings,
+ * trees and people all sort against each other rather than only within
+ * their own kind.
+ */
+interface DrawItem {
+  depth: number;
+  /** Screen position the sprite is anchored at. */
+  x: number;
+  y: number;
+  sprite: Sprite;
+  /** Trees are drawn at a per-tree scale; everything else at 1. */
+  scale: number;
+  /** Set for buildings, so the selection outline and warning draw with it. */
+  building: Building | null;
+}
+
+function byDepth(a: DrawItem, b: DrawItem): number {
+  return a.depth - b.depth;
+}
+
+/**
+ * Depth a building sorts at.
+ *
+ * A building is emitted once, from its anchor — the footprint's north-west
+ * corner, and so its *smallest* x + y. Sorting it there puts it behind
+ * anything standing on the tiles it covers, which is backwards, so it sorts
+ * on its far corner instead. Where it draws is unchanged.
+ */
+export function buildingDepth(
+  building: { x: number; y: number; width: number; height: number },
+  elevation: number,
+): number {
+  return depthOf(building.x + building.width - 1, building.y + building.height - 1, elevation);
+}
+
+/**
+ * Depth a tree sorts at, including the sub-tile offset that decides where it
+ * is actually standing.
+ *
+ * The offset is given in screen pixels; inverting the projection turns it
+ * back into a tile position. Only the north-south part moves a tree in
+ * depth — nudging one east or west slides it along its own diagonal.
+ */
+export function treeDepth(
+  x: number,
+  y: number,
+  tree: { ox: number; oy: number },
+  elevation: number,
+): number {
+  return depthOf(x + (tree.oy + tree.ox) / 2, y + (tree.oy - tree.ox) / 2, elevation);
+}
+
+/**
+ * Height under a point given in fractional tile coordinates, interpolated so
+ * that someone walking between two elevation steps rises smoothly instead of
+ * popping a full step at the tile boundary.
+ */
+export function sampleElevation(city: CityState, x: number, y: number): number {
+  const width = city.width;
+  const height = city.height;
+  const elevation = city.map.elevation;
+  const x0 = Math.floor(x);
+  const y0 = Math.floor(y);
+  const fx = x - x0;
+  const fy = y - y0;
+  const lx = x0 < 0 ? 0 : x0 > width - 1 ? width - 1 : x0;
+  const hx = x0 + 1 < 0 ? 0 : x0 + 1 > width - 1 ? width - 1 : x0 + 1;
+  const ly = y0 < 0 ? 0 : y0 > height - 1 ? height - 1 : y0;
+  const hy = y0 + 1 < 0 ? 0 : y0 + 1 > height - 1 ? height - 1 : y0 + 1;
+  const topLeft = elevation[ly * width + lx];
+  const topRight = elevation[ly * width + hx];
+  const bottomLeft = elevation[hy * width + lx];
+  const bottomRight = elevation[hy * width + hx];
+  const top = topLeft + (topRight - topLeft) * fx;
+  const bottom = bottomLeft + (bottomRight - bottomLeft) * fx;
+  return top + (bottom - top) * fy;
+}
+
 export class Renderer {
   readonly canvas: HTMLCanvasElement;
   readonly camera = new Camera();
@@ -60,6 +143,10 @@ export class Renderer {
   private sky: CanvasGradient | null = null;
   /** Frame time in milliseconds, smoothed, for the debug readout. */
   frameTime = 0;
+  /** This frame's sprites, rebuilt each frame and sorted by depth. */
+  private drawItems: DrawItem[] = [];
+  /** Backing store for the above, kept between frames and never shrunk. */
+  private itemPool: DrawItem[] = [];
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -123,8 +210,12 @@ export class Renderer {
   }
 
   /**
-   * Draw everything standing on the ground, in isometric depth order:
-   * along successive diagonals, nearest last.
+   * Draw everything standing on the ground, nearest last.
+   *
+   * Collected into one list with an explicit depth per sprite, then sorted,
+   * so that height, multi-tile footprints and sub-tile positions all take
+   * part in the ordering — none of which a walk over x + y diagonals can
+   * express. The list and its items are reused between frames.
    */
   private drawObjects(
     city: CityState,
@@ -136,15 +227,13 @@ export class Renderer {
     const zoom = this.camera.zoom;
     // Foliage and people are not worth drawing when zoomed far out.
     const drawDetail = zoom >= DETAIL_ZOOM;
-    const agentsByTile = drawDetail ? this.bucketAgents(city, range) : null;
     const width = city.width;
     const elevation = city.map.elevation;
+    const items = this.drawItems;
+    items.length = 0;
 
-    for (let sum = range.x0 + range.y0; sum <= range.x1 + range.y1; sum++) {
-      const startX = Math.max(range.x0, sum - range.y1);
-      const endX = Math.min(range.x1, sum - range.y0);
-      for (let x = startX; x <= endX; x++) {
-        const y = sum - x;
+    for (let y = range.y0; y <= range.y1; y++) {
+      for (let x = range.x0; x <= range.x1; x++) {
         const index = y * width + x;
         const step = elevation[index];
         const cx = (x - y) * HALF_WIDTH;
@@ -154,80 +243,128 @@ export class Renderer {
         if (cx + 90 < view.left || cx - 90 > view.right) continue;
         if (cy + 90 < view.top || cy - 200 > view.bottom) continue;
 
+        const tileDepth = depthOf(x, y, step);
+
         // Streets.
         const road = city.roads[index] as RoadType;
         if (road !== RoadType.None) {
-          const sprite = getRoadSprite(road, roadConnectionMask(city, x, y));
-          ctx.drawImage(sprite.canvas, cx - sprite.originX, cy - sprite.originY);
+          this.push(tileDepth, cx, cy, getRoadSprite(road, roadConnectionMask(city, x, y)), 1, null);
         }
 
         // The curtain wall.
         const wallIndex = city.wallAt[index];
         if (wallIndex >= 0) {
           const segment = city.walls[wallIndex];
-          const sprite = getWallSprite(segment.kind, segment.connections, segment.orientation);
-          ctx.drawImage(sprite.canvas, cx - sprite.originX, cy - sprite.originY);
+          this.push(
+            tileDepth,
+            cx,
+            cy,
+            getWallSprite(segment.kind, segment.connections, segment.orientation),
+            1,
+            null,
+          );
         }
 
-        // Buildings draw from their anchor tile only.
+        // Buildings are emitted once, from their anchor tile, but sort on
+        // their far corner — see `buildingDepth`.
         const buildingId = city.buildingAt[index];
         if (buildingId >= 0) {
           const building = city.buildings.get(buildingId);
           if (building && building.x === x && building.y === y) {
             const sprite = getBuildingSprite(building.defId, building.variant, building.facing, building.abandoned);
-            ctx.drawImage(sprite.canvas, cx - sprite.originX, cy - sprite.originY);
-            if (options.selectedBuilding === building.id) {
-              this.outlineBuilding(city, building.x, building.y, building.width, building.height);
-            }
-            if (!building.connected && !building.abandoned && drawDetail) {
-              this.drawWarningIcon(cx, cy - sprite.originY * 0.55, options.time);
-            }
+            this.push(buildingDepth(building, step), cx, cy, sprite, 1, building);
           }
         } else if (drawDetail && road === RoadType.None && wallIndex < 0) {
-          // Woodland, but only where nothing has been built.
+          // Woodland, but only where nothing has been built. A tree nudged
+          // toward a corner of its tile sorts from where it actually stands
+          // — see `treeDepth`.
           for (const tree of treesOnTile(city.map, x, y)) {
-            const sprite = getTreeSprite(tree.variant);
-            ctx.save();
-            ctx.translate(cx + tree.ox * HALF_WIDTH, cy + tree.oy * HALF_HEIGHT);
-            ctx.scale(tree.scale, tree.scale);
-            ctx.drawImage(sprite.canvas, -sprite.originX, -sprite.originY);
-            ctx.restore();
+            this.push(
+              treeDepth(x, y, tree, step),
+              cx + tree.ox * HALF_WIDTH,
+              cy + tree.oy * HALF_HEIGHT,
+              getTreeSprite(tree.variant),
+              tree.scale,
+              null,
+            );
           }
         }
+      }
+    }
 
-        // People and carts standing on this tile.
-        if (agentsByTile) {
-          const agents = agentsByTile.get(index);
-          if (agents) {
-            for (const agent of agents) {
-              const worldX = (agent.x - agent.y) * HALF_WIDTH;
-              const worldY = (agent.x + agent.y) * HALF_HEIGHT - step * ELEVATION_STEP;
-              const direction = directionOf(agent.heading);
-              const frame = Math.floor(options.time * 5 + agent.id) % 2;
-              const sprite = getAgentSprite(agent.kind, agent.variant, direction, frame);
-              ctx.drawImage(sprite.canvas, worldX - sprite.originX, worldY - sprite.originY);
-            }
-          }
+    // People and carts, at their own continuous position and their own
+    // height, so two villagers on one tile keep a stable order and neither
+    // pops a full step crossing a slope.
+    if (drawDetail) {
+      for (const agent of city.agents) {
+        if (agent.x < range.x0 || agent.x > range.x1 || agent.y < range.y0 || agent.y > range.y1) continue;
+        const height = sampleElevation(city, agent.x, agent.y);
+        const worldX = (agent.x - agent.y) * HALF_WIDTH;
+        const worldY = (agent.x + agent.y) * HALF_HEIGHT - height * ELEVATION_STEP;
+        if (worldX + 90 < view.left || worldX - 90 > view.right) continue;
+        if (worldY + 90 < view.top || worldY - 200 > view.bottom) continue;
+        const direction = directionOf(agent.heading);
+        const frame = Math.floor(options.time * 5 + agent.id) % 2;
+        const sprite = getAgentSprite(agent.kind, agent.variant, direction, frame);
+        this.push(depthOf(agent.x, agent.y, height), worldX, worldY, sprite, 1, null);
+      }
+    }
+
+    items.sort(byDepth);
+
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      const sprite = item.sprite;
+      if (item.scale === 1) {
+        ctx.drawImage(sprite.canvas, item.x - sprite.originX, item.y - sprite.originY);
+      } else {
+        ctx.save();
+        ctx.translate(item.x, item.y);
+        ctx.scale(item.scale, item.scale);
+        ctx.drawImage(sprite.canvas, -sprite.originX, -sprite.originY);
+        ctx.restore();
+      }
+
+      const building = item.building;
+      if (building) {
+        if (options.selectedBuilding === building.id) {
+          this.outlineBuilding(city, building.x, building.y, building.width, building.height);
+        }
+        if (!building.connected && !building.abandoned && drawDetail) {
+          this.drawWarningIcon(item.x, item.y - sprite.originY * 0.55, options.time);
         }
       }
     }
   }
 
-  private bucketAgents(
-    city: CityState,
-    range: { x0: number; y0: number; x1: number; y1: number },
-  ): Map<number, typeof city.agents> {
-    const buckets = new Map<number, typeof city.agents>();
-    for (const agent of city.agents) {
-      const tx = Math.round(agent.x);
-      const ty = Math.round(agent.y);
-      if (tx < range.x0 || tx > range.x1 || ty < range.y0 || ty > range.y1) continue;
-      const index = tileIndex(city, tx, ty);
-      const list = buckets.get(index);
-      if (list) list.push(agent);
-      else buckets.set(index, [agent]);
+  /**
+   * Add a sprite to this frame's draw list, reusing the item object from the
+   * previous frame so a busy frame allocates nothing per sprite.
+   */
+  private push(
+    depth: number,
+    x: number,
+    y: number,
+    sprite: Sprite,
+    scale: number,
+    building: Building | null,
+  ): void {
+    const items = this.drawItems;
+    const pool = this.itemPool;
+    const index = items.length;
+    let item = pool[index];
+    if (!item) {
+      item = { depth, x, y, sprite, scale, building };
+      pool[index] = item;
+    } else {
+      item.depth = depth;
+      item.x = x;
+      item.y = y;
+      item.sprite = sprite;
+      item.scale = scale;
+      item.building = building;
     }
-    return buckets;
+    items.push(item);
   }
 
   private outlineBuilding(city: CityState, x: number, y: number, width: number, height: number): void {
