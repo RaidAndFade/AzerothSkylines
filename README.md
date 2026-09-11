@@ -13,7 +13,9 @@ it works.
 
 ## Playing
 
-Open `dist/index.html` in a browser.
+Open [`dist/index.html`](dist/index.html) in any browser — download the one
+file and it runs offline, on a phone or a desktop. Or build it yourself with
+`npm install && npm run build`.
 
 | | |
 |---|---|
@@ -104,7 +106,10 @@ npm run sheet      # -> dist/sheet.html, a contact sheet of every sprite
 ```
 
 `npm run sheet` is a development aid: it renders the whole sprite catalogue
-on one page so the artwork can be reviewed side by side.
+on one page so the artwork can be reviewed side by side. `tools/` holds
+scripts that drive the built game in a real browser — a full interface
+playthrough, panel screenshots and a frame-pacing measurement. See
+[`tools/README.md`](tools/README.md).
 
 ### Tests
 

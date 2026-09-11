@@ -97,7 +97,7 @@ export const BUILDING_STYLES: Record<string, BuildingStyle> = {
   house4: { wall: WHITE_STONE, roof: 'blue', roofShape: 'hip', wallHeight: 46, roofHeight: 26, features: ['banner', 'spire', 'chimney'], windows: '#F7DE93' },
 
   // --- Trade --------------------------------------------------------------
-  shop1: { wall: PALETTE.timberLight, roof: 'red', roofShape: 'flat', wallHeight: 12, roofHeight: 10, features: ['stall', 'awning'] },
+  shop1: { wall: PALETTE.timberLight, roof: 'red', roofShape: 'gable', wallHeight: 15, roofHeight: 12, features: ['stall', 'awning'] },
   shop2: { wall: PLASTER, timbered: true, roof: 'red', roofShape: 'gable', wallHeight: 30, roofHeight: 16, features: ['sign', 'awning'], windows: '#F7DE93' },
   shop3: { wall: WHITE_STONE, roof: 'blue', roofShape: 'gable', wallHeight: 40, roofHeight: 19, features: ['sign', 'banner'], windows: '#F7DE93' },
   shop4: { wall: WHITE_STONE, roof: 'blue', roofShape: 'hip', wallHeight: 48, roofHeight: 26, features: ['banner', 'sign', 'awning'], windows: '#F7DE93' },
@@ -148,7 +148,7 @@ export const BUILDING_STYLES: Record<string, BuildingStyle> = {
   keep: { wall: WHITE_STONE, roof: 'blue', roofShape: 'hip', wallHeight: 68, roofHeight: 34, features: ['spire', 'banner', 'crenellations'], windows: '#F7DE93' },
 
   // --- Trade with the world ----------------------------------------------
-  market: { wall: PALETTE.timberLight, roof: 'blue', roofShape: 'flat', wallHeight: 14, roofHeight: 10, features: ['stall', 'awning', 'crates'] },
+  market: { wall: PALETTE.timberLight, roof: 'blue', roofShape: 'gable', wallHeight: 16, roofHeight: 13, features: ['stall', 'awning', 'crates'] },
   caravanserai: { wall: PLASTER, roof: 'violet', roofShape: 'hip', wallHeight: 28, roofHeight: 20, features: ['waggon', 'crates', 'banner'] },
   docks: { wall: PALETTE.timber, roof: 'blue', roofShape: 'gable', wallHeight: 28, roofHeight: 20, features: ['pier', 'crates'] },
 };

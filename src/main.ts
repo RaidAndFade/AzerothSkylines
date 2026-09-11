@@ -6,7 +6,7 @@
  */
 import './ui/styles.css';
 
-import { CityState, buildingAtTile, buildingCenter, createCity, parcelForTile, tileIndex } from './sim/city';
+import { CityState, PARCEL_SIZE, buildingAtTile, buildingCenter, createCity, parcelForTile, tileIndex } from './sim/city';
 import { Simulation } from './sim/simulation';
 import { createTrafficQueue } from './sim/agents';
 import { buyParcel } from './sim/build';
@@ -54,12 +54,7 @@ class Game {
 
     this.renderer = new Renderer(this.canvas);
     this.renderer.camera.setWorldBounds(city.width, city.height);
-    this.renderer.camera.centreOnTile(
-      city.map.foundingSite.x,
-      city.map.foundingSite.y,
-      city.map.elevation[tileIndex(city, city.map.foundingSite.x, city.map.foundingSite.y)],
-    );
-    this.renderer.camera.zoom = 1;
+    this.frameDistrict(city);
 
     this.hud = new Hud(root, this.tool, {
       onToolChange: (next) => this.setTool(next),
@@ -110,6 +105,19 @@ class Game {
     this.hud.showHint('Lay a street off the king’s road, then zone beside it.');
     installDebugHandle(this);
     requestAnimationFrame(this.frame);
+  }
+
+  /** Open on the founding district as a whole, at a workable zoom. */
+  private frameDistrict(city: CityState): void {
+    const span = PARCEL_SIZE * city.map.districtParcels;
+    const centreX = city.map.foundingDistrict.x * PARCEL_SIZE + span / 2;
+    const centreY = city.map.foundingDistrict.y * PARCEL_SIZE + span / 2;
+    this.renderer.camera.zoom = 0.85;
+    this.renderer.camera.centreOnTile(
+      centreX,
+      centreY,
+      city.map.elevation[tileIndex(city, Math.round(centreX), Math.round(centreY))] ?? 0,
+    );
   }
 
   /** Live city state, for the console handle and automated tests. */
@@ -353,11 +361,7 @@ class Game {
     this.preview = null;
     this.lastAutosaveDay = city.clock.totalDays;
     this.renderer.camera.setWorldBounds(city.width, city.height);
-    this.renderer.camera.centreOnTile(
-      city.map.foundingSite.x,
-      city.map.foundingSite.y,
-      city.map.elevation[tileIndex(city, city.map.foundingSite.x, city.map.foundingSite.y)],
-    );
+    this.frameDistrict(city);
   }
 }
 

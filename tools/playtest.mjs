@@ -4,10 +4,13 @@
  */
 import { chromium } from 'playwright';
 import path from 'node:path';
+import fs from 'node:fs';
+import os from 'node:os';
+import { launchOptions } from './browser.mjs';
 
-const OUT = process.env.SHOTS || '/tmp/claude-0/-home-user-AzerothSkylines/9f80addc-118d-5987-851e-92fddca9dff8/scratchpad/shots';
+const OUT = process.env.SHOTS ?? fs.mkdtempSync(path.join(os.tmpdir(), 'azeroth-shots-'));
 const W = 430, H = 932;
-const browser = await chromium.launch({ executablePath: '/opt/pw-browsers/chromium-1194/chrome-linux/chrome' });
+const browser = await chromium.launch(launchOptions());
 const ctx = await browser.newContext({ viewport: { width: W, height: H }, deviceScaleFactor: 2 });
 const page = await ctx.newPage();
 const errors = [];
@@ -159,3 +162,4 @@ console.log('FINAL', JSON.stringify(state, null, 1));
 console.log('PLACEMENT FAILURES:', failures.length ? failures : 'none');
 console.log('ERRORS:', errors.length ? errors.slice(0, 8) : 'none');
 await browser.close();
+console.log('screenshots ->', OUT);

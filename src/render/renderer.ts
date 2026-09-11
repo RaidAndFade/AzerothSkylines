@@ -5,10 +5,10 @@
  * on it is drawn front to back along isometric diagonals, so a cottage
  * correctly hides the hedge behind it and the wall hides the cottage.
  */
-import { ELEVATION_STEP, HALF_HEIGHT, HALF_WIDTH, tileToWorld } from './iso';
+import { ELEVATION_STEP, HALF_HEIGHT, HALF_WIDTH } from './iso';
 import { PALETTE, mix, withAlpha } from './palette';
 import { Camera } from './camera';
-import { drawTerrain, strokeTile, strokeTileRect } from './terrainLayer';
+import { DETAIL_ZOOM, TileRange, ViewRect, drawTerrain, strokeTile, strokeTileRect } from './terrainLayer';
 import { getBuildingSprite } from './buildingSprites';
 import { getAgentSprite, getRoadSprite, getTreeSprite, getWallSprite } from './propSprites';
 import { AgentKind, RoadType, Service, Terrain, Zone, isWater } from '../sim/types';
@@ -56,6 +56,8 @@ export class Renderer {
   readonly camera = new Camera();
   private ctx: CanvasRenderingContext2D;
   private pixelRatio = 1;
+  /** Rebuilt only on resize; creating it per frame was pure waste. */
+  private sky: CanvasGradient | null = null;
   /** Frame time in milliseconds, smoothed, for the debug readout. */
   frameTime = 0;
 
@@ -73,6 +75,7 @@ export class Renderer {
     this.canvas.style.width = `${width}px`;
     this.canvas.style.height = `${height}px`;
     this.camera.resize(width, height);
+    this.sky = null;
   }
 
   render(city: CityState, options: RenderOptions): void {
@@ -85,16 +88,19 @@ export class Renderer {
     ctx.save();
     this.camera.applyTransform(ctx);
 
+    // Computed once and passed down: culling ran per tile, and each call
+    // allocated a fresh rectangle.
+    const view = this.camera.visibleWorldRect();
     const range = this.camera.visibleTileRect(city.width, city.height);
-    drawTerrain(ctx, city, this.camera, range, {
+    drawTerrain(ctx, city, view, range, {
       time: options.time,
       showZones: options.showZones,
-      showOwnership: true,
+      zoom: this.camera.zoom,
     });
 
     if (options.overlay !== 'none') this.drawOverlay(city, range, options.overlay);
 
-    this.drawObjects(city, range, options);
+    this.drawObjects(city, view, range, options);
     this.drawParcelGrid(city, range, options);
     this.drawPreview(city, options);
 
@@ -106,10 +112,13 @@ export class Renderer {
 
   private drawSky(): void {
     const ctx = this.ctx;
-    const gradient = ctx.createLinearGradient(0, 0, 0, this.camera.viewHeight);
-    gradient.addColorStop(0, SKY_TOP);
-    gradient.addColorStop(1, SKY_BOTTOM);
-    ctx.fillStyle = gradient;
+    if (!this.sky) {
+      const gradient = ctx.createLinearGradient(0, 0, 0, this.camera.viewHeight);
+      gradient.addColorStop(0, SKY_TOP);
+      gradient.addColorStop(1, SKY_BOTTOM);
+      this.sky = gradient;
+    }
+    ctx.fillStyle = this.sky;
     ctx.fillRect(0, 0, this.camera.viewWidth, this.camera.viewHeight);
   }
 
@@ -119,31 +128,37 @@ export class Renderer {
    */
   private drawObjects(
     city: CityState,
-    range: { x0: number; y0: number; x1: number; y1: number },
+    view: ViewRect,
+    range: TileRange,
     options: RenderOptions,
   ): void {
     const ctx = this.ctx;
-    const agentsByTile = this.bucketAgents(city, range);
     const zoom = this.camera.zoom;
     // Foliage and people are not worth drawing when zoomed far out.
-    const drawDetail = zoom > 0.42;
+    const drawDetail = zoom >= DETAIL_ZOOM;
+    const agentsByTile = drawDetail ? this.bucketAgents(city, range) : null;
+    const width = city.width;
+    const elevation = city.map.elevation;
 
     for (let sum = range.x0 + range.y0; sum <= range.x1 + range.y1; sum++) {
       const startX = Math.max(range.x0, sum - range.y1);
       const endX = Math.min(range.x1, sum - range.y0);
       for (let x = startX; x <= endX; x++) {
         const y = sum - x;
-        const index = tileIndex(city, x, y);
-        const elevation = city.map.elevation[index];
-        const centre = tileToWorld(x, y, elevation);
+        const index = y * width + x;
+        const step = elevation[index];
+        const cx = (x - y) * HALF_WIDTH;
+        const cy = (x + y) * HALF_HEIGHT - step * ELEVATION_STEP;
 
-        if (!this.camera.isVisible(centre.x - 90, centre.y - 200, centre.x + 90, centre.y + 90)) continue;
+        // Inline culling, with headroom for tall sprites above the tile.
+        if (cx + 90 < view.left || cx - 90 > view.right) continue;
+        if (cy + 90 < view.top || cy - 200 > view.bottom) continue;
 
         // Streets.
         const road = city.roads[index] as RoadType;
         if (road !== RoadType.None) {
           const sprite = getRoadSprite(road, roadConnectionMask(city, x, y));
-          ctx.drawImage(sprite.canvas, centre.x - sprite.originX, centre.y - sprite.originY);
+          ctx.drawImage(sprite.canvas, cx - sprite.originX, cy - sprite.originY);
         }
 
         // The curtain wall.
@@ -151,7 +166,7 @@ export class Renderer {
         if (wallIndex >= 0) {
           const segment = city.walls[wallIndex];
           const sprite = getWallSprite(segment.kind, segment.connections, segment.orientation);
-          ctx.drawImage(sprite.canvas, centre.x - sprite.originX, centre.y - sprite.originY);
+          ctx.drawImage(sprite.canvas, cx - sprite.originX, cy - sprite.originY);
         }
 
         // Buildings draw from their anchor tile only.
@@ -160,26 +175,20 @@ export class Renderer {
           const building = city.buildings.get(buildingId);
           if (building && building.x === x && building.y === y) {
             const sprite = getBuildingSprite(building.defId, building.variant, building.facing, building.abandoned);
-            ctx.drawImage(
-              sprite.canvas,
-              centre.x - sprite.originX,
-              centre.y - HALF_HEIGHT - sprite.originY + HALF_HEIGHT,
-            );
+            ctx.drawImage(sprite.canvas, cx - sprite.originX, cy - sprite.originY);
             if (options.selectedBuilding === building.id) {
               this.outlineBuilding(city, building.x, building.y, building.width, building.height);
             }
-            if (!building.connected && !building.abandoned) {
-              this.drawWarningIcon(centre.x, centre.y - sprite.originY * 0.55, options.time);
+            if (!building.connected && !building.abandoned && drawDetail) {
+              this.drawWarningIcon(cx, cy - sprite.originY * 0.55, options.time);
             }
           }
         } else if (drawDetail && road === RoadType.None && wallIndex < 0) {
           // Woodland, but only where nothing has been built.
           for (const tree of treesOnTile(city.map, x, y)) {
             const sprite = getTreeSprite(tree.variant);
-            const worldX = centre.x + tree.ox * HALF_WIDTH;
-            const worldY = centre.y + tree.oy * HALF_HEIGHT;
             ctx.save();
-            ctx.translate(worldX, worldY);
+            ctx.translate(cx + tree.ox * HALF_WIDTH, cy + tree.oy * HALF_HEIGHT);
             ctx.scale(tree.scale, tree.scale);
             ctx.drawImage(sprite.canvas, -sprite.originX, -sprite.originY);
             ctx.restore();
@@ -187,16 +196,16 @@ export class Renderer {
         }
 
         // People and carts standing on this tile.
-        if (drawDetail) {
+        if (agentsByTile) {
           const agents = agentsByTile.get(index);
           if (agents) {
             for (const agent of agents) {
-              const agentElevation = city.map.elevation[index];
-              const world = tileToWorld(agent.x, agent.y, agentElevation);
+              const worldX = (agent.x - agent.y) * HALF_WIDTH;
+              const worldY = (agent.x + agent.y) * HALF_HEIGHT - step * ELEVATION_STEP;
               const direction = directionOf(agent.heading);
               const frame = Math.floor(options.time * 5 + agent.id) % 2;
               const sprite = getAgentSprite(agent.kind, agent.variant, direction, frame);
-              ctx.drawImage(sprite.canvas, world.x - sprite.originX, world.y - sprite.originY);
+              ctx.drawImage(sprite.canvas, worldX - sprite.originX, worldY - sprite.originY);
             }
           }
         }
@@ -249,11 +258,7 @@ export class Renderer {
 
   // --- Overlays -------------------------------------------------------------
 
-  private drawOverlay(
-    city: CityState,
-    range: { x0: number; y0: number; x1: number; y1: number },
-    overlay: Overlay,
-  ): void {
+  private drawOverlay(city: CityState, range: TileRange, overlay: Overlay): void {
     if (overlay === 'land') return;
     const field = overlayField(city, overlay);
     if (!field) return;
@@ -274,11 +279,12 @@ export class Renderer {
           path = new Path2D();
           buckets.set(bucket, path);
         }
-        const centre = tileToWorld(x, y, city.map.elevation[index]);
-        path.moveTo(centre.x, centre.y - HALF_HEIGHT);
-        path.lineTo(centre.x + HALF_WIDTH, centre.y);
-        path.lineTo(centre.x, centre.y + HALF_HEIGHT);
-        path.lineTo(centre.x - HALF_WIDTH, centre.y);
+        const cx = (x - y) * HALF_WIDTH;
+        const cy = (x + y) * HALF_HEIGHT - city.map.elevation[index] * ELEVATION_STEP;
+        path.moveTo(cx, cy - HALF_HEIGHT);
+        path.lineTo(cx + HALF_WIDTH, cy);
+        path.lineTo(cx, cy + HALF_HEIGHT);
+        path.lineTo(cx - HALF_WIDTH, cy);
         path.closePath();
       }
     }
@@ -290,11 +296,7 @@ export class Renderer {
   }
 
   /** Parcel boundaries, and the lot the player is being quoted for. */
-  private drawParcelGrid(
-    city: CityState,
-    range: { x0: number; y0: number; x1: number; y1: number },
-    options: RenderOptions,
-  ): void {
+  private drawParcelGrid(city: CityState, range: TileRange, options: RenderOptions): void {
     if (options.overlay !== 'land' && !options.highlightParcel) return;
     const ctx = this.ctx;
 

@@ -1,5 +1,10 @@
 node_modules/
-dist/
 coverage/
 *.log
 .DS_Store
+
+# The build directory is ignored, except for the game itself: a single
+# self-contained file is the whole point, so it is kept in the repository
+# ready to download and open.
+dist/*
+!dist/index.html

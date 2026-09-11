@@ -1,23 +1,29 @@
 /**
  * Ground rendering.
  *
- * Terrain is drawn as batched isometric diamonds: tiles are bucketed by
- * class and shade, and each bucket is filled in a single path. That keeps
- * a full screen of Elwynn down to a few dozen draw calls while still
- * giving every tile its own slight variation in colour.
+ * Terrain is drawn as batched isometric diamonds: every visible tile is
+ * visited exactly once, bucketed by class and shade, and each bucket is
+ * filled in a single path. That keeps a full screen of Elwynn down to a few
+ * dozen draw calls while still giving every tile its own slight variation in
+ * colour.
+ *
+ * The loop is deliberately allocation-free — no points, no rectangles, no
+ * closures per tile — because at the widest zoom it runs over the whole
+ * valley every frame.
  */
-import { ELEVATION_STEP, HALF_HEIGHT, HALF_WIDTH, tileToWorld } from './iso';
+import { ELEVATION_STEP, HALF_HEIGHT, HALF_WIDTH } from './iso';
 import { PALETTE, mix, shade, withAlpha } from './palette';
-import { Terrain, Zone, isWater } from '../sim/types';
-import { CityState, tileIndex } from '../sim/city';
+import { Terrain, Zone } from '../sim/types';
+import { CityState, PARCEL_SIZE } from '../sim/city';
 import { MAX_ELEVATION } from '../sim/terrain';
 import { hash2 } from '../core/rng';
-import { Camera } from './camera';
 
 /** How many shade steps each terrain class is split into when batching. */
 const SHADE_STEPS = 4;
+/** Below this zoom the fine detail costs more than it adds. */
+export const DETAIL_ZOOM = 0.5;
 
-/** Base colours for each terrain class, light to dark across the shade steps. */
+/** Base colours for each terrain class, dark to light across the shade steps. */
 const TERRAIN_RAMPS: Record<number, [string, string]> = {
   [Terrain.DeepWater]: [PALETTE.waterDeep, PALETTE.water],
   [Terrain.ShallowWater]: [PALETTE.water, PALETTE.waterShallow],
@@ -41,20 +47,44 @@ const CLIFF_COLORS: Record<number, string> = {
   [Terrain.ShallowWater]: PALETTE.water,
 };
 
-/** Resolve the ramp colour for a terrain class at a given shade step. */
-function rampColor(terrain: Terrain, step: number): string {
+/** Every colour a tile top can take, flattened into one lookup. */
+const GROUND_COLORS: string[] = [];
+/** Cliff colours, one lit and one shaded per terrain class. */
+const CLIFF_LIT: string[] = [];
+const CLIFF_SHADED: string[] = [];
+for (let terrain = 0; terrain <= Terrain.Snow; terrain++) {
   const ramp = TERRAIN_RAMPS[terrain] ?? [PALETTE.grassDark, PALETTE.grassLight];
-  return mix(ramp[0], ramp[1], step / (SHADE_STEPS - 1));
+  for (let step = 0; step < SHADE_STEPS; step++) {
+    GROUND_COLORS[terrain * SHADE_STEPS + step] = mix(ramp[0], ramp[1], step / (SHADE_STEPS - 1));
+  }
+  const cliff = CLIFF_COLORS[terrain] ?? PALETTE.dirt;
+  CLIFF_LIT[terrain] = shade(cliff, -0.08);
+  CLIFF_SHADED[terrain] = shade(cliff, -0.26);
 }
 
-const rampCache = new Map<number, string>();
-function cachedRamp(terrain: Terrain, step: number): string {
-  const key = terrain * SHADE_STEPS + step;
-  const existing = rampCache.get(key);
-  if (existing) return existing;
-  const color = rampColor(terrain, step);
-  rampCache.set(key, color);
-  return color;
+const ZONE_FILL: Record<number, string> = {
+  [Zone.Residential]: withAlpha(PALETTE.zoneResidential, 0.42),
+  [Zone.Commercial]: withAlpha(PALETTE.zoneCommercial, 0.42),
+  [Zone.Industrial]: withAlpha(PALETTE.zoneIndustrial, 0.42),
+};
+const ZONE_EDGE: Record<number, string> = {
+  [Zone.Residential]: withAlpha(PALETTE.zoneResidential, 0.85),
+  [Zone.Commercial]: withAlpha(PALETTE.zoneCommercial, 0.85),
+  [Zone.Industrial]: withAlpha(PALETTE.zoneIndustrial, 0.85),
+};
+
+export interface TileRange {
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+}
+
+export interface ViewRect {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
 }
 
 export interface TerrainDrawOptions {
@@ -62,235 +92,217 @@ export interface TerrainDrawOptions {
   time: number;
   /** Draw the zoning paint over the ground. */
   showZones: boolean;
-  /** Tint tiles the city does not own. */
-  showOwnership: boolean;
+  /** Current camera zoom, which decides how much detail is worth drawing. */
+  zoom: number;
+}
+
+/** Reused path buckets, so a frame allocates nothing per tile. */
+const groundPaths: (Path2D | null)[] = [];
+const cliffPaths: (Path2D | null)[] = [];
+const zonePaths: (Path2D | null)[] = [];
+let shorePath: Path2D | null = null;
+let unownedPath: Path2D | null = null;
+
+function diamond(path: Path2D, cx: number, cy: number, scale = 1): void {
+  const hw = HALF_WIDTH * scale;
+  const hh = HALF_HEIGHT * scale;
+  path.moveTo(cx, cy - hh);
+  path.lineTo(cx + hw, cy);
+  path.lineTo(cx, cy + hh);
+  path.lineTo(cx - hw, cy);
+  path.closePath();
 }
 
 /**
- * Paint the ground for every tile in the given range.
+ * Paint the ground for every tile in the given range, in a single pass.
  * The context must already carry the camera transform.
  */
 export function drawTerrain(
   ctx: CanvasRenderingContext2D,
   city: CityState,
-  camera: Camera,
-  range: { x0: number; y0: number; x1: number; y1: number },
+  view: ViewRect,
+  range: TileRange,
   options: TerrainDrawOptions,
 ): void {
-  const buckets = new Map<string, Path2D>();
-  const cliffs = new Map<string, Path2D>();
-  const waterTiles: { x: number; y: number }[] = [];
+  groundPaths.length = 0;
+  cliffPaths.length = 0;
+  zonePaths.length = 0;
+  shorePath = null;
+  unownedPath = null;
 
-  const addTo = (map: Map<string, Path2D>, color: string): Path2D => {
-    let path = map.get(color);
-    if (!path) {
-      path = new Path2D();
-      map.set(color, path);
-    }
-    return path;
-  };
+  const detail = options.zoom >= DETAIL_ZOOM;
+  const width = city.width;
+  const seed = city.map.seed;
+  const elevation = city.map.elevation;
+  const terrainData = city.map.terrain;
+  const moisture = city.map.moisture;
+
+  // Shimmer needs the water tiles; collected inline to avoid a second pass.
+  const shimmerX: number[] = [];
+  const shimmerY: number[] = [];
 
   for (let y = range.y0; y <= range.y1; y++) {
+    const rowIndex = y * width;
     for (let x = range.x0; x <= range.x1; x++) {
-      const index = tileIndex(city, x, y);
-      const terrain = city.map.terrain[index] as Terrain;
-      const elevation = city.map.elevation[index];
-      const centre = tileToWorld(x, y, elevation);
+      const index = rowIndex + x;
+      const step = elevation[index];
+      const cx = (x - y) * HALF_WIDTH;
+      const cy = (x + y) * HALF_HEIGHT - step * ELEVATION_STEP;
 
-      if (!camera.isVisible(centre.x - HALF_WIDTH, centre.y - HALF_HEIGHT - 4, centre.x + HALF_WIDTH, centre.y + HALF_HEIGHT + ELEVATION_STEP * 3)) {
-        continue;
-      }
+      // Inline culling: a rectangle test, no allocation.
+      if (cx + HALF_WIDTH < view.left || cx - HALF_WIDTH > view.right) continue;
+      if (cy + HALF_HEIGHT + ELEVATION_STEP * 3 < view.top || cy - HALF_HEIGHT - 4 > view.bottom) continue;
 
-      // Cliff faces first: the two sides that can be seen below a tile.
-      const southElevation = y + 1 <= city.height - 1 ? city.map.elevation[tileIndex(city, x, y + 1)] : elevation;
-      const eastElevation = x + 1 <= city.width - 1 ? city.map.elevation[tileIndex(city, x + 1, y)] : elevation;
-      const drop = Math.max(elevation - southElevation, elevation - eastElevation);
-      if (drop > 0) {
-        const cliffBase = CLIFF_COLORS[terrain] ?? PALETTE.dirt;
-        if (elevation > southElevation) {
-          const path = addTo(cliffs, shade(cliffBase, -0.08));
-          const height = (elevation - southElevation) * ELEVATION_STEP;
-          path.moveTo(centre.x - HALF_WIDTH, centre.y);
-          path.lineTo(centre.x, centre.y + HALF_HEIGHT);
-          path.lineTo(centre.x, centre.y + HALF_HEIGHT + height);
-          path.lineTo(centre.x - HALF_WIDTH, centre.y + height);
+      const terrain = terrainData[index];
+
+      // --- cliff faces, for the two sides that can be seen below a tile ---
+      if (detail) {
+        const southStep = y + 1 <= city.height - 1 ? elevation[index + width] : step;
+        const eastStep = x + 1 <= width - 1 ? elevation[index + 1] : step;
+        if (step > southStep) {
+          let path = cliffPaths[terrain];
+          if (!path) {
+            path = new Path2D();
+            cliffPaths[terrain] = path;
+          }
+          const drop = (step - southStep) * ELEVATION_STEP;
+          path.moveTo(cx - HALF_WIDTH, cy);
+          path.lineTo(cx, cy + HALF_HEIGHT);
+          path.lineTo(cx, cy + HALF_HEIGHT + drop);
+          path.lineTo(cx - HALF_WIDTH, cy + drop);
           path.closePath();
         }
-        if (elevation > eastElevation) {
-          const path = addTo(cliffs, shade(cliffBase, -0.26));
-          const height = (elevation - eastElevation) * ELEVATION_STEP;
-          path.moveTo(centre.x + HALF_WIDTH, centre.y);
-          path.lineTo(centre.x, centre.y + HALF_HEIGHT);
-          path.lineTo(centre.x, centre.y + HALF_HEIGHT + height);
-          path.lineTo(centre.x + HALF_WIDTH, centre.y + height);
+        if (step > eastStep) {
+          const shadedIndex = terrain + 16;
+          let path = cliffPaths[shadedIndex];
+          if (!path) {
+            path = new Path2D();
+            cliffPaths[shadedIndex] = path;
+          }
+          const drop = (step - eastStep) * ELEVATION_STEP;
+          path.moveTo(cx + HALF_WIDTH, cy);
+          path.lineTo(cx, cy + HALF_HEIGHT);
+          path.lineTo(cx, cy + HALF_HEIGHT + drop);
+          path.lineTo(cx + HALF_WIDTH, cy + drop);
           path.closePath();
         }
       }
 
-      // The tile top.
-      const variation = hash2(x, y, city.map.seed);
-      const moisture = city.map.moisture[index];
-      const step = Math.min(
-        SHADE_STEPS - 1,
-        Math.max(0, Math.floor((variation * 0.55 + moisture * 0.3 + (elevation / MAX_ELEVATION) * 0.15) * SHADE_STEPS)),
+      // --- the tile top ---------------------------------------------------
+      const variation = hash2(x, y, seed);
+      let bucket = Math.floor(
+        (variation * 0.55 + moisture[index] * 0.3 + (step / MAX_ELEVATION) * 0.15) * SHADE_STEPS,
       );
-      const color = cachedRamp(terrain, step);
-      const path = addTo(buckets, color);
-      path.moveTo(centre.x, centre.y - HALF_HEIGHT);
-      path.lineTo(centre.x + HALF_WIDTH, centre.y);
-      path.lineTo(centre.x, centre.y + HALF_HEIGHT);
-      path.lineTo(centre.x - HALF_WIDTH, centre.y);
-      path.closePath();
+      if (bucket < 0) bucket = 0;
+      else if (bucket >= SHADE_STEPS) bucket = SHADE_STEPS - 1;
 
-      if (isWater(terrain)) waterTiles.push({ x, y });
-    }
-  }
+      const key = terrain * SHADE_STEPS + bucket;
+      let ground = groundPaths[key];
+      if (!ground) {
+        ground = new Path2D();
+        groundPaths[key] = ground;
+      }
+      diamond(ground, cx, cy);
 
-  for (const [color, path] of cliffs) {
-    ctx.fillStyle = color;
-    ctx.fill(path);
-  }
-  for (const [color, path] of buckets) {
-    ctx.fillStyle = color;
-    ctx.fill(path);
-  }
-
-  drawShoreline(ctx, city, range);
-  drawWaterShimmer(ctx, waterTiles, options.time);
-
-  if (options.showOwnership) drawUnownedTint(ctx, city, range);
-  if (options.showZones) drawZonePaint(ctx, city, range);
-}
-
-/** A pale rim where water meets land, which reads as shallows and foam. */
-function drawShoreline(
-  ctx: CanvasRenderingContext2D,
-  city: CityState,
-  range: { x0: number; y0: number; x1: number; y1: number },
-): void {
-  const path = new Path2D();
-  let any = false;
-  for (let y = range.y0; y <= range.y1; y++) {
-    for (let x = range.x0; x <= range.x1; x++) {
-      const index = tileIndex(city, x, y);
-      if (!isWater(city.map.terrain[index] as Terrain)) continue;
-      let touchesLand = false;
-      for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-        const nx = x + dx;
-        const ny = y + dy;
-        if (nx < 0 || ny < 0 || nx >= city.width || ny >= city.height) continue;
-        if (!isWater(city.map.terrain[tileIndex(city, nx, ny)] as Terrain)) {
-          touchesLand = true;
-          break;
+      // --- water edges and glints ------------------------------------------
+      if (terrain <= Terrain.ShallowWater) {
+        if (detail) {
+          const landward =
+            (x > 0 && terrainData[index - 1] > Terrain.ShallowWater) ||
+            (x < width - 1 && terrainData[index + 1] > Terrain.ShallowWater) ||
+            (y > 0 && terrainData[index - width] > Terrain.ShallowWater) ||
+            (y < city.height - 1 && terrainData[index + width] > Terrain.ShallowWater);
+          if (landward) {
+            if (!shorePath) shorePath = new Path2D();
+            diamond(shorePath, cx, cy);
+          }
+          shimmerX.push(cx);
+          shimmerY.push(cy);
         }
       }
-      if (!touchesLand) continue;
-      any = true;
-      const centre = tileToWorld(x, y, 0);
-      path.moveTo(centre.x, centre.y - HALF_HEIGHT);
-      path.lineTo(centre.x + HALF_WIDTH, centre.y);
-      path.lineTo(centre.x, centre.y + HALF_HEIGHT);
-      path.lineTo(centre.x - HALF_WIDTH, centre.y);
-      path.closePath();
+
+      // --- land the city does not hold --------------------------------------
+      const parcel = city.parcels[Math.floor(y / PARCEL_SIZE) * city.parcelsWide + Math.floor(x / PARCEL_SIZE)];
+      if (!parcel?.owned) {
+        if (!unownedPath) unownedPath = new Path2D();
+        diamond(unownedPath, cx, cy);
+      }
+
+      // --- zoning paint, where nothing has been built yet --------------------
+      if (options.showZones) {
+        const zone = city.zones[index];
+        if (zone !== Zone.None && city.buildingAt[index] < 0) {
+          let path = zonePaths[zone];
+          if (!path) {
+            path = new Path2D();
+            zonePaths[zone] = path;
+          }
+          diamond(path, cx, cy, 0.82);
+        }
+      }
     }
   }
-  if (!any) return;
-  ctx.fillStyle = withAlpha(PALETTE.waterShallow, 0.55);
-  ctx.fill(path);
+
+  // --- one fill per bucket ------------------------------------------------
+  for (let i = 0; i < cliffPaths.length; i++) {
+    const path = cliffPaths[i];
+    if (!path) continue;
+    ctx.fillStyle = i >= 16 ? CLIFF_SHADED[i - 16] : CLIFF_LIT[i];
+    ctx.fill(path);
+  }
+  for (let i = 0; i < groundPaths.length; i++) {
+    const path = groundPaths[i];
+    if (!path) continue;
+    ctx.fillStyle = GROUND_COLORS[i];
+    ctx.fill(path);
+  }
+  if (shorePath) {
+    ctx.fillStyle = withAlpha(PALETTE.waterShallow, 0.55);
+    ctx.fill(shorePath);
+  }
+  if (detail && shimmerX.length > 0) drawWaterShimmer(ctx, shimmerX, shimmerY, options.time, seed);
+  if (unownedPath) {
+    ctx.fillStyle = 'rgba(28, 34, 56, 0.2)';
+    ctx.fill(unownedPath);
+  }
+  for (let i = 0; i < zonePaths.length; i++) {
+    const path = zonePaths[i];
+    if (!path) continue;
+    ctx.fillStyle = ZONE_FILL[i];
+    ctx.fill(path);
+    // Stroking thousands of subpaths is expensive, and the outline adds
+    // nothing once each plot is a few pixels across.
+    if (detail) {
+      ctx.strokeStyle = ZONE_EDGE[i];
+      ctx.lineWidth = 1.4;
+      ctx.stroke(path);
+    }
+  }
 }
 
 /** Slow, cheap highlights drifting across the water. */
 function drawWaterShimmer(
   ctx: CanvasRenderingContext2D,
-  tiles: { x: number; y: number }[],
+  xs: number[],
+  ys: number[],
   time: number,
+  seed: number,
 ): void {
-  if (tiles.length === 0) return;
   ctx.strokeStyle = withAlpha(PALETTE.waterFoam, 0.3);
   ctx.lineWidth = 2;
   ctx.beginPath();
-  for (const tile of tiles) {
-    const phase = hash2(tile.x, tile.y, 91) * Math.PI * 2;
+  let any = false;
+  for (let i = 0; i < xs.length; i++) {
+    const phase = hash2(Math.round(xs[i]), Math.round(ys[i]), seed ^ 91) * Math.PI * 2;
     const wobble = Math.sin(time * 1.3 + phase);
     // Only about a third of tiles carry a glint at any moment.
     if (wobble < 0.45) continue;
-    const centre = tileToWorld(tile.x, tile.y, 0);
     const offset = Math.cos(time * 0.9 + phase) * 7;
-    ctx.moveTo(centre.x - 9 + offset, centre.y);
-    ctx.lineTo(centre.x + 4 + offset, centre.y - 2);
+    ctx.moveTo(xs[i] - 9 + offset, ys[i]);
+    ctx.lineTo(xs[i] + 4 + offset, ys[i] - 2);
+    any = true;
   }
-  ctx.stroke();
-}
-
-/** Land beyond the city's holdings is drawn cooler and flatter. */
-function drawUnownedTint(
-  ctx: CanvasRenderingContext2D,
-  city: CityState,
-  range: { x0: number; y0: number; x1: number; y1: number },
-): void {
-  const path = new Path2D();
-  let any = false;
-  for (let y = range.y0; y <= range.y1; y++) {
-    for (let x = range.x0; x <= range.x1; x++) {
-      const parcel = city.parcels[
-        Math.floor(y / 8) * city.parcelsWide + Math.floor(x / 8)
-      ];
-      if (parcel?.owned) continue;
-      any = true;
-      const centre = tileToWorld(x, y, city.map.elevation[tileIndex(city, x, y)]);
-      path.moveTo(centre.x, centre.y - HALF_HEIGHT);
-      path.lineTo(centre.x + HALF_WIDTH, centre.y);
-      path.lineTo(centre.x, centre.y + HALF_HEIGHT);
-      path.lineTo(centre.x - HALF_WIDTH, centre.y);
-      path.closePath();
-    }
-  }
-  if (!any) return;
-  ctx.fillStyle = 'rgba(28, 34, 56, 0.2)';
-  ctx.fill(path);
-}
-
-const ZONE_COLORS: Record<number, string> = {
-  [Zone.Residential]: PALETTE.zoneResidential,
-  [Zone.Commercial]: PALETTE.zoneCommercial,
-  [Zone.Industrial]: PALETTE.zoneIndustrial,
-};
-
-/** Zoning paint, drawn as a translucent wash with a bright border. */
-function drawZonePaint(
-  ctx: CanvasRenderingContext2D,
-  city: CityState,
-  range: { x0: number; y0: number; x1: number; y1: number },
-): void {
-  const fills = new Map<number, Path2D>();
-  for (let y = range.y0; y <= range.y1; y++) {
-    for (let x = range.x0; x <= range.x1; x++) {
-      const index = tileIndex(city, x, y);
-      const zone = city.zones[index] as Zone;
-      if (zone === Zone.None) continue;
-      // Once a building stands on it, the paint has done its job.
-      if (city.buildingAt[index] >= 0) continue;
-      let path = fills.get(zone);
-      if (!path) {
-        path = new Path2D();
-        fills.set(zone, path);
-      }
-      const centre = tileToWorld(x, y, city.map.elevation[index]);
-      const inset = 0.82;
-      path.moveTo(centre.x, centre.y - HALF_HEIGHT * inset);
-      path.lineTo(centre.x + HALF_WIDTH * inset, centre.y);
-      path.lineTo(centre.x, centre.y + HALF_HEIGHT * inset);
-      path.lineTo(centre.x - HALF_WIDTH * inset, centre.y);
-      path.closePath();
-    }
-  }
-  for (const [zone, path] of fills) {
-    ctx.fillStyle = withAlpha(ZONE_COLORS[zone] ?? PALETTE.grass, 0.42);
-    ctx.fill(path);
-    ctx.strokeStyle = withAlpha(ZONE_COLORS[zone] ?? PALETTE.grass, 0.85);
-    ctx.lineWidth = 1.4;
-    ctx.stroke(path);
-  }
+  if (any) ctx.stroke();
 }
 
 /** Outline one tile, for cursors and build previews. */
@@ -304,13 +316,14 @@ export function strokeTile(
   fill?: string,
 ): void {
   if (x < 0 || y < 0 || x >= city.width || y >= city.height) return;
-  const elevation = city.map.elevation[tileIndex(city, x, y)];
-  const centre = tileToWorld(x, y, elevation);
+  const step = city.map.elevation[y * city.width + x];
+  const cx = (x - y) * HALF_WIDTH;
+  const cy = (x + y) * HALF_HEIGHT - step * ELEVATION_STEP;
   ctx.beginPath();
-  ctx.moveTo(centre.x, centre.y - HALF_HEIGHT);
-  ctx.lineTo(centre.x + HALF_WIDTH, centre.y);
-  ctx.lineTo(centre.x, centre.y + HALF_HEIGHT);
-  ctx.lineTo(centre.x - HALF_WIDTH, centre.y);
+  ctx.moveTo(cx, cy - HALF_HEIGHT);
+  ctx.lineTo(cx + HALF_WIDTH, cy);
+  ctx.lineTo(cx, cy + HALF_HEIGHT);
+  ctx.lineTo(cx - HALF_WIDTH, cy);
   ctx.closePath();
   if (fill) {
     ctx.fillStyle = fill;
@@ -333,11 +346,19 @@ export function strokeTileRect(
   lineWidth = 2,
   fill?: string,
 ): void {
-  const elevation = city.map.elevation[tileIndex(city, Math.min(city.width - 1, x), Math.min(city.height - 1, y))];
-  const north = tileToWorld(x, y, elevation);
-  const east = tileToWorld(x + width - 1, y, elevation);
-  const south = tileToWorld(x + width - 1, y + height - 1, elevation);
-  const west = tileToWorld(x, y + height - 1, elevation);
+  const cx = Math.min(city.width - 1, Math.max(0, x));
+  const cy = Math.min(city.height - 1, Math.max(0, y));
+  const step = city.map.elevation[cy * city.width + cx];
+  const lift = step * ELEVATION_STEP;
+  const project = (tx: number, ty: number) => ({
+    x: (tx - ty) * HALF_WIDTH,
+    y: (tx + ty) * HALF_HEIGHT - lift,
+  });
+
+  const north = project(x, y);
+  const east = project(x + width - 1, y);
+  const south = project(x + width - 1, y + height - 1);
+  const west = project(x, y + height - 1);
 
   ctx.beginPath();
   ctx.moveTo(north.x, north.y - HALF_HEIGHT);

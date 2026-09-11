@@ -62,6 +62,11 @@ const OVERLAYS: { id: Overlay; label: string }[] = [
   { id: 'land', label: 'Lots for Sale' },
 ];
 
+/** "1 gate", "3 gates" — small thing, but the HUD is read constantly. */
+function plural(count: number, noun: string): string {
+  return `${count} ${noun}${count === 1 ? '' : 's'}`;
+}
+
 export class Hud {
   readonly root: HTMLElement;
   private readonly callbacks: HudCallbacks;
@@ -468,7 +473,7 @@ export class Hud {
         { class: 'rows' },
         statRow('Taxes', gold(budget.lastIncome)),
         statRow('Trade', gold(budget.lastTrade)),
-        statRow('Upkeep', `-${gold(budget.lastUpkeep)}`),
+        statRow('Upkeep', budget.lastUpkeep > 0.5 ? `-${gold(budget.lastUpkeep)}` : gold(0)),
         statRow('Net', `${net >= 0 ? '+' : ''}${gold(net)}`),
         statRow('Treasury', gold(budget.gold)),
       ),
@@ -521,7 +526,10 @@ export class Hud {
         statRow('Land value', percent(stats.landValue), stats.landValue),
         statRow('Filth', percent(stats.pollution), stats.pollution),
         statRow('Buildings', `${compact(stats.buildingCount)} (${stats.abandonedCount} derelict)`),
-        statRow('City wall', `${walls.walls + walls.towers} lengths · ${walls.towers} towers · ${walls.gates} gates`),
+        statRow(
+          'City wall',
+          `${plural(walls.walls + walls.towers, 'length')} · ${plural(walls.towers, 'tower')} · ${plural(walls.gates, 'gate')}`,
+        ),
       ),
       el('div', { class: 'section-title', text: 'Goods' }),
       el('div', { class: 'rows' }, ...goodsRows),

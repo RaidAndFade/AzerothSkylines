@@ -179,8 +179,10 @@ export function updateStats(city: CityState, input: StatsInput): void {
 
   // Service scores: the share of buildings actually reached.
   const served: Record<Service, number> = { ...stats.services };
-  served[Service.Water] = input.waterDemand > 0 ? input.waterServed / input.waterDemand : 1;
-  served[Service.Sewage] = input.sewageDemand > 0 ? input.sewageServed / input.sewageDemand : 1;
+  // With nothing built there is nothing to serve; report nothing rather than
+  // a reassuring hundred per cent of nobody.
+  served[Service.Water] = input.waterDemand > 0 ? input.waterServed / input.waterDemand : 0;
+  served[Service.Sewage] = input.sewageDemand > 0 ? input.sewageServed / input.sewageDemand : 0;
   for (const service of ALL_SERVICES) {
     if (service === Service.Water || service === Service.Sewage) continue;
     served[service] = averageOverDwellings(city, service);

@@ -24,6 +24,8 @@ export const MAX_CARTS = 20;
 export const PATH_BUDGET_PER_STEP = 8;
 /** Seconds an agent may spend stuck before it gives up and vanishes. */
 export const AGENT_PATIENCE = 40;
+/** Pairings tried before a spawn is abandoned for this tick. */
+const SPAWN_ATTEMPTS = 5;
 
 const BASE_SPEED: Record<AgentKind, number> = {
   [AgentKind.Peasant]: 1.5,
@@ -55,26 +57,42 @@ function stepAgent(city: CityState, agent: Agent, dt: number): boolean {
   if (agent.patience <= 0) return false;
   if (agent.step >= agent.path.length) return false;
 
-  const targetIndex = agent.path[agent.step];
-  const tx = targetIndex % city.width;
-  const ty = (targetIndex / city.width) | 0;
-
-  const dx = tx - agent.x;
-  const dy = ty - agent.y;
-  const distance = Math.hypot(dx, dy);
-
-  if (distance < 0.06) {
-    agent.step++;
-    if (agent.step >= agent.path.length) return onArrival(city, agent);
-    return true;
-  }
-
   const tile = roadAt(city, Math.round(agent.x), Math.round(agent.y));
-  const speed = agent.speed * roadSpeed(tile);
-  const travel = Math.min(distance, speed * dt);
-  agent.x += (dx / distance) * travel;
-  agent.y += (dy / distance) * travel;
-  agent.heading = Math.atan2(dy, dx);
+  // Spend the whole frame's travel, crossing as many waypoints as it takes.
+  // A single waypoint per frame would cap movement at high game speeds and
+  // on slow frames.
+  let remaining = agent.speed * roadSpeed(tile) * dt;
+  let guard = 0;
+
+  while (remaining > 0 && guard++ < 8) {
+    if (agent.step >= agent.path.length) return onArrival(city, agent);
+
+    const targetIndex = agent.path[agent.step];
+    const tx = targetIndex % city.width;
+    const ty = (targetIndex / city.width) | 0;
+    const dx = tx - agent.x;
+    const dy = ty - agent.y;
+    const distance = Math.hypot(dx, dy);
+
+    if (distance < 1e-4) {
+      agent.step++;
+      continue;
+    }
+    agent.heading = Math.atan2(dy, dx);
+
+    if (distance <= remaining) {
+      agent.x = tx;
+      agent.y = ty;
+      remaining -= distance;
+      agent.step++;
+      if (agent.step >= agent.path.length) return onArrival(city, agent);
+      continue;
+    }
+
+    agent.x += (dx / distance) * remaining;
+    agent.y += (dy / distance) * remaining;
+    remaining = 0;
+  }
   return true;
 }
 
@@ -241,45 +259,57 @@ function spawnCart(city: CityState, from: Building, to: Building, good: Good): b
 function spawnPeasant(city: CityState): boolean {
   const homes = pickBuildings(city, (b) => b.kind === BuildingKind.Dwelling && b.residents > 0 && b.connected);
   if (homes.length === 0) return false;
-  const home = city.rng.pick(homes);
 
   const destinations = pickBuildings(
     city,
     (b) =>
-      b.id !== home.id &&
       b.connected &&
       !b.abandoned &&
-      (b.kind === BuildingKind.Shop || b.kind === BuildingKind.Workshop || b.kind === BuildingKind.Service || b.kind === BuildingKind.TradeHub),
+      (b.kind === BuildingKind.Shop ||
+        b.kind === BuildingKind.Workshop ||
+        b.kind === BuildingKind.Service ||
+        b.kind === BuildingKind.TradeHub),
   );
   if (destinations.length === 0) return false;
 
-  const start = doorTile(city, home);
-  const target = city.rng.pick(destinations);
-  const end = doorTile(city, target);
-  if (!start || !end) return false;
+  // Two buildings can share a door tile, which leaves no journey to walk.
+  // Try a few pairings before giving up, so one unlucky draw does not stop
+  // the whole city's foot traffic for this tick.
+  for (let attempt = 0; attempt < SPAWN_ATTEMPTS; attempt++) {
+    const home = city.rng.pick(homes);
+    const target = city.rng.pick(destinations);
+    if (target.id === home.id) continue;
+    const start = doorTile(city, home);
+    const end = doorTile(city, target);
+    if (!start || !end) continue;
 
-  const path = findRoadPath(city, start, end, { maxNodes: 2000 });
-  if (!path || path.length < 2) return false;
+    const path = findRoadPath(city, start, end, { maxNodes: 2000 });
+    if (!path || path.length < 2) continue;
 
-  const agent = newAgent(city, AgentKind.Peasant, start.x, start.y, path);
-  agent.homeBuilding = home.id;
-  agent.targetBuilding = target.id;
-  agent.patience = AGENT_PATIENCE * 2;
-  agent.errands = city.rng.int(2, 5);
-  city.agents.push(agent);
-  return true;
+    const agent = newAgent(city, AgentKind.Peasant, start.x, start.y, path);
+    agent.homeBuilding = home.id;
+    agent.targetBuilding = target.id;
+    agent.patience = AGENT_PATIENCE * 2;
+    agent.errands = city.rng.int(2, 5);
+    city.agents.push(agent);
+    return true;
+  }
+  return false;
 }
 
 function spawnGuard(city: CityState): boolean {
-  const start = randomPatrolTarget(city);
-  const end = randomPatrolTarget(city);
-  if (!start || !end) return false;
-  const path = findRoadPath(city, start, end, { maxNodes: 1800 });
-  if (!path || path.length < 2) return false;
-  const agent = newAgent(city, AgentKind.Guard, start.x, start.y, path);
-  agent.patience = AGENT_PATIENCE * 3;
-  city.agents.push(agent);
-  return true;
+  for (let attempt = 0; attempt < SPAWN_ATTEMPTS; attempt++) {
+    const start = randomPatrolTarget(city);
+    const end = randomPatrolTarget(city);
+    if (!start || !end) return false;
+    const path = findRoadPath(city, start, end, { maxNodes: 1800 });
+    if (!path || path.length < 2) continue;
+    const agent = newAgent(city, AgentKind.Guard, start.x, start.y, path);
+    agent.patience = AGENT_PATIENCE * 3;
+    city.agents.push(agent);
+    return true;
+  }
+  return false;
 }
 
 /** Guards walk the streets nearest the wall, where they can see trouble coming. */
@@ -313,20 +343,24 @@ function spawnTraveler(city: CityState): boolean {
     (b) => b.connected && !b.abandoned && (b.kind === BuildingKind.TradeHub || getDef(b.defId).provides?.leisure !== undefined),
   );
   if (attractions.length === 0) return false;
-  const target = city.rng.pick(attractions);
-  const end = doorTile(city, target);
-  if (!end) return false;
 
-  const path = findRoadPath(city, { x: entry.x, y: entry.y }, end, { maxNodes: 3000 });
-  if (!path || path.length < 2) return false;
+  for (let attempt = 0; attempt < SPAWN_ATTEMPTS; attempt++) {
+    const target = city.rng.pick(attractions);
+    const end = doorTile(city, target);
+    if (!end) continue;
 
-  const agent = newAgent(city, AgentKind.Traveler, entry.x, entry.y, path);
-  agent.targetBuilding = target.id;
-  agent.patience = AGENT_PATIENCE * 3;
-  // Visitors see a sight or two before they move on.
-  agent.errands = city.rng.int(1, 3);
-  city.agents.push(agent);
-  return true;
+    const path = findRoadPath(city, { x: entry.x, y: entry.y }, end, { maxNodes: 3000 });
+    if (!path || path.length < 2) continue;
+
+    const agent = newAgent(city, AgentKind.Traveler, entry.x, entry.y, path);
+    agent.targetBuilding = target.id;
+    agent.patience = AGENT_PATIENCE * 3;
+    // Visitors see a sight or two before they move on.
+    agent.errands = city.rng.int(1, 3);
+    city.agents.push(agent);
+    return true;
+  }
+  return false;
 }
 
 function pickBuildings(city: CityState, predicate: (b: Building) => boolean): Building[] {
