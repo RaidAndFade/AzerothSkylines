@@ -16,6 +16,7 @@ import {
   registerBuilding,
   removeBuilding,
   tileIndex,
+  treeDensityAt,
 } from './city';
 import { INDUSTRY_LINES, IndustryLine, getDef, growthLadder } from '../data/buildings';
 import { frontageFacing, hasStreetFrontage } from './zoning';
@@ -178,7 +179,7 @@ export function chooseIndustryLine(city: CityState, x: number, y: number): Indus
       if (!inCity(city, nx, ny)) continue;
       const i = tileIndex(city, nx, ny);
       fertility += city.map.fertility[i];
-      trees += city.map.treeDensity[i];
+      trees += treeDensityAt(city, nx, ny);
       ore += city.map.oreRichness[i];
       samples++;
     }

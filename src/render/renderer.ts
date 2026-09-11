@@ -14,8 +14,8 @@ import { GroundField, buildGroundField } from './groundTexture';
 import { getBuildingSprite } from './buildingSprites';
 import { Sprite, getAgentSprite, getPropSprite, getTreeSprite, getWallSprite } from './propSprites';
 import { AgentKind, Building, RoadType, Service, Terrain, Zone, isWater } from '../sim/types';
-import { CityState, PARCEL_SIZE, tileIndex } from '../sim/city';
-import { propsOnTile, treesOnTile } from '../sim/terrain';
+import { CityState, PARCEL_SIZE, standingTreesOnTile, tileIndex } from '../sim/city';
+import { propsOnTile } from '../sim/terrain';
 import { getDef } from '../data/buildings';
 
 export type Overlay =
@@ -294,7 +294,9 @@ export class Renderer {
               );
             }
           }
-          for (const tree of treesOnTile(city.map, x, y)) {
+          // Woodland, but only where the city has not already cleared the
+          // ground to take it.
+          for (const tree of standingTreesOnTile(city, x, y)) {
             this.push(
               scatterDepth(x, y, tree, step),
               cx + tree.ox * HALF_WIDTH,

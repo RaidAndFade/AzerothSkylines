@@ -44,7 +44,8 @@ The game opens on a short guide, and it is in the menu thereafter. In brief:
 4. Zone for **Trade** so there is somewhere to buy bread, and **Crafting**
    so there is somewhere to work. Keep the forges downwind of the houses.
 5. When the district fills, use **Land** to buy the next lot. The curtain
-   wall moves out to enclose it; you pay for the land and the new masonry.
+   wall moves out to enclose it and its woodland comes down; you pay for the
+   land and the new masonry.
 
 ## How it works
 
@@ -59,8 +60,9 @@ rock and snow, and quantised into eight elevation steps.
 
 The founding district is chosen **before** the town site: every possible
 block of parcels is scored on how much of it is workable, level ground, and
-the best one is claimed whole. (Choosing a promising tile first and claiming
-land around it afterwards is how settlements end up straddling a river.) The
+the best one is claimed whole — and felled, since a town is not built in a
+forest. (Choosing a promising tile first and claiming land around it
+afterwards is how settlements end up straddling a river.) The
 king's road is then A\*-routed in from the valley edge, preferring flat, dry,
 open ground, and a level corridor is cut and filled along it.
 
