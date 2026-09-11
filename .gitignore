@@ -3,8 +3,7 @@ coverage/
 *.log
 .DS_Store
 
-# The build directory is ignored, except for the game itself: a single
-# self-contained file is the whole point, so it is kept in the repository
-# ready to download and open.
-dist/*
-!dist/index.html
+# The build output is not kept in the repository. CI builds it on every push
+# and publishes it to GitHub Pages; the single self-contained file is also
+# attached to each run as a downloadable artifact.
+dist/

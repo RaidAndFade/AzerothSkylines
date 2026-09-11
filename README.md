@@ -13,9 +13,13 @@ it works.
 
 ## Playing
 
-Open [`dist/index.html`](dist/index.html) in any browser — download the one
-file and it runs offline, on a phone or a desktop. Or build it yourself with
-`npm install && npm run build`.
+**[Play it in your browser](https://raidandfade.github.io/AzerothSkylines/)** —
+the current state of `master`, republished on every push.
+
+To keep a copy, download `index.html` from any [Build
+run](https://github.com/RaidAndFade/AzerothSkylines/actions/workflows/build.yml):
+one file, which runs offline on a phone, a laptop or a USB stick. Or build it
+yourself with `npm install && npm run build`.
 
 | | |
 |---|---|
@@ -109,6 +113,12 @@ npm test           # the simulation test suite
 npm run typecheck  # strict TypeScript, no emit
 npm run sheet      # -> dist/sheet.html, a contact sheet of every sprite
 ```
+
+`dist/` is not kept in the repository. GitHub Actions runs the typecheck, the
+linter and the tests on every push and pull request, builds the game, and
+attaches `index.html` to the run; pushes to `master` deploy it to GitHub
+Pages. Build locally whenever you want the file in hand — the scripts in
+`tools/` expect it at `dist/index.html`.
 
 `npm run sheet` is a development aid: it renders the whole sprite catalogue
 on one page so the artwork can be reviewed side by side. `tools/` holds
