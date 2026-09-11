@@ -8,12 +8,13 @@
 import { ELEVATION_STEP, HALF_HEIGHT, HALF_WIDTH } from './iso';
 import { PALETTE, mix, withAlpha } from './palette';
 import { Camera } from './camera';
-import { DETAIL_ZOOM, TileRange, ViewRect, drawTerrain, strokeTile, strokeTileRect } from './terrainLayer';
+import { DETAIL_ZOOM, FLORA_ZOOM, TileRange, ViewRect, drawTerrain, strokeTile, strokeTileRect } from './terrainLayer';
+import { GroundField, buildGroundField } from './groundTexture';
 import { getBuildingSprite } from './buildingSprites';
-import { getAgentSprite, getRoadSprite, getTreeSprite, getWallSprite } from './propSprites';
+import { getAgentSprite, getPropSprite, getTreeSprite, getWallSprite } from './propSprites';
 import { AgentKind, RoadType, Service, Terrain, Zone, isWater } from '../sim/types';
 import { CityState, PARCEL_SIZE, standingTreesOnTile, tileIndex } from '../sim/city';
-import { roadConnectionMask } from '../sim/roads';
+import { propsOnTile } from '../sim/terrain';
 import { getDef } from '../data/buildings';
 
 export type Overlay =
@@ -57,6 +58,9 @@ export class Renderer {
   private pixelRatio = 1;
   /** Rebuilt only on resize; creating it per frame was pure waste. */
   private sky: CanvasGradient | null = null;
+  /** The baked ground colour field, rebuilt only when the valley changes. */
+  private ground: GroundField | null = null;
+  private groundSeed = Number.NaN;
   /** Frame time in milliseconds, smoothed, for the debug readout. */
   frameTime = 0;
 
@@ -91,7 +95,7 @@ export class Renderer {
     // allocated a fresh rectangle.
     const view = this.camera.visibleWorldRect();
     const range = this.camera.visibleTileRect(city.width, city.height);
-    drawTerrain(ctx, city, view, range, {
+    drawTerrain(ctx, city, this.groundField(city), view, range, {
       time: options.time,
       showZones: options.showZones,
       zoom: this.camera.zoom,
@@ -107,6 +111,15 @@ export class Renderer {
 
     const elapsed = performance.now() - started;
     this.frameTime = this.frameTime * 0.9 + elapsed * 0.1;
+  }
+
+  /** The colour field for this valley, baked on first sight. */
+  private groundField(city: CityState): GroundField {
+    if (!this.ground || this.groundSeed !== city.map.seed) {
+      this.ground = buildGroundField(city);
+      this.groundSeed = city.map.seed;
+    }
+    return this.ground;
   }
 
   private drawSky(): void {
@@ -153,13 +166,6 @@ export class Renderer {
         if (cx + 90 < view.left || cx - 90 > view.right) continue;
         if (cy + 90 < view.top || cy - 200 > view.bottom) continue;
 
-        // Streets.
-        const road = city.roads[index] as RoadType;
-        if (road !== RoadType.None) {
-          const sprite = getRoadSprite(road, roadConnectionMask(city, x, y));
-          ctx.drawImage(sprite.canvas, cx - sprite.originX, cy - sprite.originY);
-        }
-
         // The curtain wall.
         const wallIndex = city.wallAt[index];
         if (wallIndex >= 0) {
@@ -182,9 +188,20 @@ export class Renderer {
               this.drawWarningIcon(cx, cy - sprite.originY * 0.55, options.time);
             }
           }
-        } else if (drawDetail && road === RoadType.None && wallIndex < 0) {
-          // Woodland, but only where nothing has been built and the city has
-          // not already cleared the ground to take it.
+        } else if (drawDetail && city.roads[index] === RoadType.None && wallIndex < 0) {
+          // Stones, flowers and tufts first, then whatever grows over them.
+          if (zoom >= FLORA_ZOOM) {
+            for (const prop of propsOnTile(city.map, x, y)) {
+              const sprite = getPropSprite(prop.variant);
+              ctx.save();
+              ctx.translate(cx + prop.ox * HALF_WIDTH, cy + prop.oy * HALF_HEIGHT);
+              ctx.scale(prop.scale, prop.scale);
+              ctx.drawImage(sprite.canvas, -sprite.originX, -sprite.originY);
+              ctx.restore();
+            }
+          }
+          // Woodland, but only where the city has not already cleared the
+          // ground to take it.
           for (const tree of standingTreesOnTile(city, x, y)) {
             const sprite = getTreeSprite(tree.variant);
             ctx.save();

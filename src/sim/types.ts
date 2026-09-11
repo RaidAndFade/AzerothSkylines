@@ -290,9 +290,11 @@ export interface Budget {
   lastIncome: number;
   lastUpkeep: number;
   lastTrade: number;
-  /** Accumulators for the month in progress. */
-  incomeAccumulator: number;
-  upkeepAccumulator: number;
+  /**
+   * Trade settles daily against the treasury, so this is not money waiting
+   * to be paid — it is the running total of what trade has already moved
+   * this month, drained by `settleMonth` into `lastTrade` for the ledger.
+   */
   tradeAccumulator: number;
 }
 

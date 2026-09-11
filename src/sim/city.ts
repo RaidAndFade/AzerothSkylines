@@ -163,8 +163,6 @@ export function createCity(options: CityOptions = {}): CityState {
       lastIncome: 0,
       lastUpkeep: 0,
       lastTrade: 0,
-      incomeAccumulator: 0,
-      upkeepAccumulator: 0,
       tradeAccumulator: 0,
     },
     stats: emptyStats(),
