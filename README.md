@@ -22,6 +22,7 @@ file and it runs offline, on a phone or a desktop. Or build it yourself with
 | **Move the map** | One finger drag (or the mouse) while Inspect is selected; two fingers any time |
 | **Zoom** | Pinch, or the scroll wheel |
 | **Draw a street** | Pick **Roads**, then drag. Streets are laid in an L from where the drag began |
+| **Footpaths** | Cheap, and the quickest way to walk — but no carts, and no water or drainage beneath them |
 | **Zone land** | Pick **Dwellings**, **Trade** or **Crafting**, then drag a rectangle beside a road |
 | **Build** | Pick **Build**, choose from the catalogue, then tap a plot fronting a road |
 | **Annex land** | Pick **Land**, tap a lot beyond the walls, and confirm the price |
@@ -32,6 +33,8 @@ Your city is saved to the browser on this device every ninety game-days, and
 from the menu.
 
 ### Getting started
+
+The game opens on a short guide, and it is in the menu thereafter. In brief:
 
 1. Lay a street off the king's road where it enters your walls.
 2. Zone dwellings along it. Buildings only grow on zoned land that fronts a
@@ -75,7 +78,7 @@ open ground, and a level corridor is cut and filled along it.
 | `sim/demand` | The three demand bars, driven by contentment, vacancies and unfilled posts |
 | `sim/economy` | Monthly taxes and upkeep |
 | `sim/walls` | The curtain wall, derived from the land you hold |
-| `sim/agents` | Villagers, carts, guards and travellers |
+| `sim/agents` | Villagers, carts, guards and travellers. Carts keep to the streets; people on foot take the paths |
 
 Every system is a plain function over plain state, which is why the whole
 simulation can be tested without a browser.

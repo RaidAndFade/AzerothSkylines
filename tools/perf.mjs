@@ -10,6 +10,11 @@ await page.waitForTimeout(400);
 await page.fill('#title input', 'Goldshire');
 await page.click('#title button');
 await page.waitForTimeout(1200);
+// A new city opens on the founding guide; dismiss it.
+if (await page.locator('#panel.open').count()) {
+  await page.locator('#panel .panel-head .icon-button').click();
+  await page.waitForTimeout(250);
+}
 
 const owned = await page.evaluate(() => {
   const c = window.azerothSkylines.city;

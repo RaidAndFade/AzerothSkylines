@@ -14,6 +14,7 @@ import {
   roadConnectionMask,
   roadSpeed,
   roadsConnect,
+  walkSpeed,
 } from '@/sim/roads';
 import { ROAD_COST } from '@/sim/city';
 import { makeFlatCity, mainRoadY } from './helpers';
@@ -119,10 +120,17 @@ describe('auto-tiling and connectivity', () => {
     expect(roadsConnect(city, 4, y, 5, y)).toBe(false);
   });
 
-  it('ranks road classes by speed', () => {
+  it('ranks road classes by how fast a cart rolls along them', () => {
     expect(roadSpeed(RoadType.Avenue)).toBeGreaterThan(roadSpeed(RoadType.Cobble));
     expect(roadSpeed(RoadType.Cobble)).toBeGreaterThan(roadSpeed(RoadType.Path));
     expect(roadSpeed(RoadType.Path)).toBeGreaterThan(roadSpeed(RoadType.None));
+  });
+
+  it('makes a footpath the quickest way to walk', () => {
+    expect(walkSpeed(RoadType.Path)).toBeGreaterThan(walkSpeed(RoadType.Avenue));
+    expect(walkSpeed(RoadType.Path)).toBeGreaterThan(walkSpeed(RoadType.Cobble));
+    // But it is the slowest way to haul anything.
+    expect(roadSpeed(RoadType.Path)).toBeLessThan(roadSpeed(RoadType.Cobble));
   });
 
   it('counts roads by class', () => {
@@ -156,6 +164,27 @@ describe('pathfinding', () => {
     const y = mainRoadY();
     expect(findRoadPath(city, { x: 1, y: 1 }, { x: 12, y })).toBeNull();
     expect(findRoadPath(city, { x: 1, y }, { x: 12, y: 1 })).toBeNull();
+  });
+
+  it('sends someone on foot down the footpath and the cart the long way', () => {
+    const city = makeFlatCity({ ownedParcels: 3, size: 48 });
+    const y = mainRoadY(3);
+    // A cobbled street, and a footpath short-cutting the same two points.
+    for (let x = 0; x < 20; x++) city.roads[tileIndex(city, x, y)] = RoadType.Cobble;
+    for (let x = 2; x <= 10; x++) city.roads[tileIndex(city, x, y - 4)] = RoadType.Path;
+    for (const dy of [-3, -2, -1]) {
+      city.roads[tileIndex(city, 2, y + dy)] = RoadType.Path;
+      city.roads[tileIndex(city, 10, y + dy)] = RoadType.Path;
+    }
+
+    const walking = findRoadPath(city, { x: 2, y }, { x: 10, y }, { onFoot: true });
+    const hauling = findRoadPath(city, { x: 2, y }, { x: 10, y }, { cartsOnly: true });
+    expect(walking).not.toBeNull();
+    expect(hauling).not.toBeNull();
+    // The cart keeps to the street; the walker is free to take the path.
+    for (const index of hauling as number[]) {
+      expect(city.roads[index]).not.toBe(RoadType.Path);
+    }
   });
 
   it('refuses to route a cart down a footpath', () => {

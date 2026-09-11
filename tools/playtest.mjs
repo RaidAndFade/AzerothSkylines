@@ -23,6 +23,15 @@ await page.fill('#title input', process.env.SEED || 'Goldshire');
 await page.click('#title button');
 await page.waitForTimeout(1800);
 
+// A new city opens on the founding guide; dismiss it the way a player would.
+const closePanel = async () => {
+  if (await page.locator('#panel.open').count()) {
+    await page.locator('#panel .panel-head .icon-button').click();
+    await page.waitForTimeout(200);
+  }
+};
+await closePanel();
+
 const at = (tx, ty) => page.evaluate(([x, y]) => window.azerothSkylines.screenForTile(x, y), [tx, ty]);
 const info = () => page.evaluate(() => {
   const c = window.azerothSkylines.city;
@@ -67,12 +76,6 @@ async function tapTile(tx, ty, label) {
   if (label && toast.cls.includes('bad')) failures.push(`${label} @${tx},${ty}: ${toast.text}`);
 }
 const tool = (label) => page.locator(`#toolbar .tool:has-text("${label}")`).first();
-async function closePanel() {
-  if (await page.locator('#panel.open').count()) {
-    await page.locator('#panel .panel-head .icon-button').click();
-    await page.waitForTimeout(120);
-  }
-}
 async function pickBuilding(name) {
   await tool('Build').click();
   await page.waitForTimeout(180);

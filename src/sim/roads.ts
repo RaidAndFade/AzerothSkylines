@@ -130,7 +130,7 @@ export function carriesCarts(type: RoadType): boolean {
   return type === RoadType.Cobble || type === RoadType.Avenue;
 }
 
-/** Travel speed multiplier for the road class. */
+/** How fast a cart rolls along a road class. */
 export function roadSpeed(type: RoadType): number {
   switch (type) {
     case RoadType.Avenue:
@@ -139,6 +139,24 @@ export function roadSpeed(type: RoadType): number {
       return 1.15;
     case RoadType.Path:
       return 0.8;
+    default:
+      return 0.45;
+  }
+}
+
+/**
+ * How fast someone on foot moves. A packed footpath is as good as cobbles
+ * for walking and better than dodging carts on an avenue, which is what
+ * makes paths worth laying: they are cheap, and they are for people.
+ */
+export function walkSpeed(type: RoadType): number {
+  switch (type) {
+    case RoadType.Path:
+      return 1.2;
+    case RoadType.Cobble:
+      return 1.05;
+    case RoadType.Avenue:
+      return 1.15;
     default:
       return 0.45;
   }
@@ -243,6 +261,8 @@ export function computeGateDistance(city: CityState): void {
 export interface PathOptions {
   /** Restrict to roads carts can use. */
   cartsOnly?: boolean;
+  /** Cost the route the way someone walking it would. */
+  onFoot?: boolean;
   /** Give up after this many expanded nodes. */
   maxNodes?: number;
 }
@@ -265,6 +285,8 @@ export function findRoadPath(
   if (roadAt(city, to.x, to.y) === RoadType.None) return null;
 
   const cartsOnly = options.cartsOnly ?? false;
+  const onFoot = options.onFoot ?? false;
+  const speedOf = onFoot ? walkSpeed : roadSpeed;
   const maxNodes = options.maxNodes ?? 4000;
 
   const gScore = new Map<number, number>();
@@ -314,7 +336,7 @@ export function findRoadPath(
       if (cartsOnly && !carriesCarts(type)) continue;
       if (!roadsConnect(city, cx, cy, nx, ny)) continue;
 
-      const step = 1 / roadSpeed(type);
+      const step = 1 / speedOf(type);
       const tentative = (gScore.get(current) ?? Infinity) + step;
       if (tentative < (gScore.get(ni) ?? Infinity)) {
         gScore.set(ni, tentative);

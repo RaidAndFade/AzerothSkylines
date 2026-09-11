@@ -22,7 +22,7 @@ import { append, button, clear, compact, el, gold, percent, statRow } from './do
 import { quoteParcel } from '../sim/build';
 import { wallStats } from '../sim/walls';
 
-export type PanelId = 'build' | 'budget' | 'city' | 'journal' | 'building' | 'land' | 'overlays' | 'menu';
+export type PanelId = 'build' | 'budget' | 'city' | 'journal' | 'building' | 'land' | 'overlays' | 'menu' | 'guide';
 
 export interface HudCallbacks {
   onToolChange(tool: Partial<ToolState> & { kind: ToolKind }): void;
@@ -359,6 +359,10 @@ export class Hud {
         this.panelTitle.textContent = 'Azeroth Skylines';
         this.renderMenu(body);
         break;
+      case 'guide':
+        this.panelTitle.textContent = 'Founding a Settlement';
+        this.renderGuide(body);
+        break;
       default:
         break;
     }
@@ -368,7 +372,7 @@ export class Hud {
   private renderRoads(body: HTMLElement): void {
     const list = el('div', { class: 'card-list' });
     const roads: { type: RoadType; cost: number; blurb: string }[] = [
-      { type: RoadType.Path, cost: 4, blurb: 'Packed dirt. Villagers only — no carts.' },
+      { type: RoadType.Path, cost: 4, blurb: 'Packed dirt, and the quickest way to walk. No carts, and no water or drainage beneath it.' },
       { type: RoadType.Cobble, cost: 14, blurb: 'The workhorse street. Carries carts and utilities.' },
       { type: RoadType.Avenue, cost: 38, blurb: 'Broad flagstones. Faster traffic, finer address.' },
     ];
@@ -666,12 +670,55 @@ export class Hud {
     ]);
   }
 
+  /** Shown once when a new city is founded, and from the menu thereafter. */
+  private renderGuide(body: HTMLElement): void {
+    const steps: [string, string][] = [
+      [
+        'Lay a street',
+        'The king\u2019s road ends inside your walls. Pick \u201cRoads\u201d and drag a cobbled street off it. Streets are laid in an L from where the drag began.',
+      ],
+      [
+        'Zone beside it',
+        'Pick \u201cDwellings\u201d and drag a rectangle along the street. Buildings only grow on zoned land that fronts a road, so leave no plot more than one tile from the cobbles.',
+      ],
+      [
+        'Sink a well, dig a drain',
+        'Water and drainage run beneath the streets, so both reach any building whose door is on a road. One well serves fourteen buildings; watch the Views map to see how far it reaches.',
+      ],
+      [
+        'Give them work and a market',
+        'Zone \u201cCrafting\u201d for workshops and \u201cTrade\u201d for shops. Keep the forges downwind: smoke drives land value down, and with it the chance of anyone building in stone.',
+      ],
+      [
+        'Post the guard',
+        'A Guard Post makes a quarter feel safe, which is worth as much to your citizens as clean water. Shrines, gardens and an inn do the rest.',
+      ],
+      [
+        'Buy the next lot',
+        'When the district fills, pick \u201cLand\u201d and tap a lot beyond the walls. You pay for the ground and for the new stonework, and the curtain wall moves out to enclose it.',
+      ],
+    ];
+
+    append(body, [
+      el('div', {
+        class: 'blurb',
+        text: 'A road runs into the valley and stops. What follows is yours.',
+      }),
+      ...steps.flatMap(([title, text], index) => [
+        el('div', { class: 'section-title', text: `${index + 1}. ${title}` }),
+        el('div', { class: 'blurb', text }),
+      ]),
+      button('action', () => this.closePanel(), 'Begin'),
+    ]);
+  }
+
   private renderMenu(body: HTMLElement): void {
     append(body, [
       el('div', {
         class: 'blurb',
         text: 'A city builder set in Elwynn Forest. Grow a settlement from the king’s road into a walled city in the manner of Stormwind.',
       }),
+      button('action secondary', () => this.togglePanel('guide', true), 'How to found a settlement'),
       el('div', { class: 'section-title', text: 'Your City' }),
       button('action secondary', () => this.callbacks.onSave(), 'Save to this device'),
       button('action secondary', () => this.callbacks.onLoad(), 'Load saved city'),
@@ -689,6 +736,8 @@ export class Hud {
   // --- transient feedback ---------------------------------------------------
 
   showToast(message: string, tone: 'good' | 'bad' | 'info' = 'info'): void {
+    // The two share the bottom of the screen; a toast is the more urgent.
+    this.hideHint();
     this.toast.textContent = message;
     this.toast.className = `show ${tone}`;
     window.clearTimeout(this.toastTimer);

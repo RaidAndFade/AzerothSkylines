@@ -102,7 +102,12 @@ class Game {
     document.addEventListener('visibilitychange', this.handleVisibility);
     this.handleResize();
 
-    this.hud.showHint('Lay a street off the king’s road, then zone beside it.');
+    // A new city opens on the guide; a loaded one carries straight on.
+    if (city.clock.totalDays <= 1 && city.buildings.size === 0) {
+      this.hud.togglePanel('guide', true);
+    } else {
+      this.hud.showHint('Lay a street off the king’s road, then zone beside it.');
+    }
     installDebugHandle(this);
     requestAnimationFrame(this.frame);
   }
@@ -314,6 +319,8 @@ class Game {
     }
     this.hud.showToast(`Lot annexed for ${Math.round(result.total)}g — the walls now enclose it`, 'good');
     this.highlightParcel = null;
+    // The quote outline belongs to a lot that is now simply part of the city.
+    this.preview = null;
     this.hud.closePanel();
   }
 
@@ -348,7 +355,7 @@ class Game {
   private newCity(): void {
     this.replaceCity(createCity({ seed: randomValleyName() }));
     this.hud.showToast('A new valley awaits', 'good');
-    this.hud.closePanel();
+    this.hud.togglePanel('guide', true);
   }
 
   private replaceCity(city: CityState): void {

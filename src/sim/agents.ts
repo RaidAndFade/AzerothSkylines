@@ -8,7 +8,7 @@
  */
 import { Agent, AgentKind, Building, BuildingKind, Good, RoadType } from './types';
 import { CityState, buildingCenter, inCity, roadAt, tileIndex } from './city';
-import { carriesCarts, doorTile, findRoadPath, roadSpeed } from './roads';
+import { carriesCarts, doorTile, findRoadPath, roadSpeed, walkSpeed } from './roads';
 import { getDef } from '../data/buildings';
 import type { Delivery } from './trade';
 
@@ -58,10 +58,11 @@ function stepAgent(city: CityState, agent: Agent, dt: number): boolean {
   if (agent.step >= agent.path.length) return false;
 
   const tile = roadAt(city, Math.round(agent.x), Math.round(agent.y));
+  const pace = agent.kind === AgentKind.Cart ? roadSpeed(tile) : walkSpeed(tile);
   // Spend the whole frame's travel, crossing as many waypoints as it takes.
   // A single waypoint per frame would cap movement at high game speeds and
   // on slow frames.
-  let remaining = agent.speed * roadSpeed(tile) * dt;
+  let remaining = agent.speed * pace * dt;
   let guard = 0;
 
   while (remaining > 0 && guard++ < 8) {
@@ -283,7 +284,7 @@ function spawnPeasant(city: CityState): boolean {
     const end = doorTile(city, target);
     if (!start || !end) continue;
 
-    const path = findRoadPath(city, start, end, { maxNodes: 2000 });
+    const path = findRoadPath(city, start, end, { onFoot: true, maxNodes: 2000 });
     if (!path || path.length < 2) continue;
 
     const agent = newAgent(city, AgentKind.Peasant, start.x, start.y, path);
@@ -302,7 +303,7 @@ function spawnGuard(city: CityState): boolean {
     const start = randomPatrolTarget(city);
     const end = randomPatrolTarget(city);
     if (!start || !end) return false;
-    const path = findRoadPath(city, start, end, { maxNodes: 1800 });
+    const path = findRoadPath(city, start, end, { onFoot: true, maxNodes: 1800 });
     if (!path || path.length < 2) continue;
     const agent = newAgent(city, AgentKind.Guard, start.x, start.y, path);
     agent.patience = AGENT_PATIENCE * 3;
@@ -349,7 +350,7 @@ function spawnTraveler(city: CityState): boolean {
     const end = doorTile(city, target);
     if (!end) continue;
 
-    const path = findRoadPath(city, { x: entry.x, y: entry.y }, end, { maxNodes: 3000 });
+    const path = findRoadPath(city, { x: entry.x, y: entry.y }, end, { onFoot: true, maxNodes: 3000 });
     if (!path || path.length < 2) continue;
 
     const agent = newAgent(city, AgentKind.Traveler, entry.x, entry.y, path);

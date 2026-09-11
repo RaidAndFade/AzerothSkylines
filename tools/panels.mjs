@@ -14,6 +14,11 @@ await page.waitForTimeout(400);
 await page.fill('#title input', 'Goldshire');
 await page.click('#title button');
 await page.waitForTimeout(1500);
+// A new city opens on the founding guide; dismiss it.
+if (await page.locator('#panel.open').count()) {
+  await page.locator('#panel .panel-head .icon-button').click();
+  await page.waitForTimeout(250);
+}
 
 // Give the city some population so unlocks and readouts have content.
 await page.evaluate(() => { window.azerothSkylines.city.stats.population = 3200; });
