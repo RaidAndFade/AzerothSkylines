@@ -176,5 +176,5 @@ Sources consulted for the setting:
 
 ## Licence
 
-MIT. Warcraft, Azeroth, Stormwind and Elwynn Forest are trademarks of
-Blizzard Entertainment; this is an unaffiliated fan project.
+MIT — see [LICENSE](LICENSE). Warcraft, Azeroth, Stormwind and Elwynn Forest
+are trademarks of Blizzard Entertainment; this is an unaffiliated fan project.
