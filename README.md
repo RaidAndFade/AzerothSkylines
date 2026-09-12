@@ -128,10 +128,15 @@ playthrough, panel screenshots and a frame-pacing measurement. See
 
 ### Tests
 
-251 tests cover each simulation system, plus two end-to-end runs: one that
+The suite covers each simulation system, plus two end-to-end runs: one that
 lays out a town, gives it water, drainage and a guard, and checks it grows
 past five hundred residents, employs them, supplies its shops and pays its
 own way; and one that neglects a town and checks it empties out.
+
+The runner owns this. It runs the suite on every push and pull request, and
+the deploy is gated on the result, so that run is the authority rather than
+anything reproduced by hand. The commands are here for when you want to sit
+with one particular test:
 
 ```
 npm test
