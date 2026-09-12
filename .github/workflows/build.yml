@@ -55,6 +55,62 @@ jobs:
         with:
           path: dist
 
+  playtest:
+    name: Play the game in a browser
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      # The build job already produced the single file; play that one rather
+      # than building it a second time.
+      - name: Fetch the built game
+        uses: actions/download-artifact@v4
+        with:
+          name: azeroth-skylines
+          path: dist
+
+      # Fails the job on any page error or placement failure.
+      - name: Playtest
+        env:
+          SHOTS: ${{ github.workspace }}/shots
+        run: |
+          mkdir -p "$SHOTS"
+          node tools/playtest.mjs
+
+      - name: Upload playtest screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playtest-screenshots
+          path: shots
+          if-no-files-found: warn
+
+      # A frame-pacing baseline on every run, printed where the run can be
+      # read without downloading anything.
+      - name: Frame pacing
+        run: |
+          set -o pipefail
+          node tools/perf.mjs | tee perf.txt
+          {
+            echo '### Frame pacing'
+            echo
+            echo '```'
+            cat perf.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
   deploy:
     name: Deploy to GitHub Pages
     needs: build

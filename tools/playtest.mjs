@@ -166,3 +166,10 @@ console.log('PLACEMENT FAILURES:', failures.length ? failures : 'none');
 console.log('ERRORS:', errors.length ? errors.slice(0, 8) : 'none');
 await browser.close();
 console.log('screenshots ->', OUT);
+
+// A playthrough that hit a page error or could not place what it asked for is
+// a failed playthrough: say so with the exit code so CI stops on it.
+if (errors.length || failures.length) {
+  console.error(`playtest failed: ${errors.length} page error(s), ${failures.length} placement failure(s)`);
+  process.exit(1);
+}
