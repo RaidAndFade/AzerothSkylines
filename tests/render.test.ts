@@ -14,7 +14,9 @@ import {
 } from '@/render/iso';
 import { PALETTE, ROOF_SETS, hexToRgb, mix, rgbToHex, shade, withAlpha } from '@/render/palette';
 import { Camera, MAX_ZOOM, MIN_ZOOM } from '@/render/camera';
-import { directionOf } from '@/render/renderer';
+import { buildingDepth, directionOf, sampleElevation, scatterDepth } from '@/render/renderer';
+import { makeFlatCity } from './helpers';
+import { tileIndex } from '@/sim/city';
 
 describe('isometric projection', () => {
   it('keeps the classic 2:1 diamond', () => {
@@ -195,6 +197,82 @@ describe('camera', () => {
     cam.centreOnTile(50, 50);
     expect(cam.isVisible(cam.x - 10, cam.y - 10, cam.x + 10, cam.y + 10)).toBe(true);
     expect(cam.isVisible(cam.x + 1e5, cam.y, cam.x + 1e5 + 10, cam.y + 10)).toBe(false);
+  });
+});
+
+describe('draw order', () => {
+  it('sorts a multi-tile building on its far corner, not its anchor', () => {
+    const hall = { x: 5, y: 5, width: 3, height: 3 };
+    // The anchor has the smallest x + y of the nine tiles it covers, so
+    // sorting there loses to everything standing on the other eight.
+    expect(buildingDepth(hall, 0)).toBeGreaterThan(depthOf(hall.x, hall.y));
+    expect(buildingDepth(hall, 0)).toBe(depthOf(7, 7));
+    for (const covered of [[6, 5], [5, 6], [6, 6], [7, 6], [6, 7]]) {
+      expect(buildingDepth(hall, 0)).toBeGreaterThan(depthOf(covered[0], covered[1]));
+    }
+  });
+
+  it('leaves a one-tile building sorting exactly where it stands', () => {
+    expect(buildingDepth({ x: 4, y: 9, width: 1, height: 1 }, 2)).toBe(depthOf(4, 9, 2));
+  });
+
+  it('keeps height in the sort key', () => {
+    expect(buildingDepth({ x: 3, y: 3, width: 1, height: 1 }, 4)).toBeGreaterThan(
+      buildingDepth({ x: 3, y: 3, width: 1, height: 1 }, 0),
+    );
+  });
+
+  it('sorts a tree from where it actually stands within its tile', () => {
+    const south = scatterDepth(4, 4, { ox: 0, oy: 0.35 }, 0);
+    const centre = scatterDepth(4, 4, { ox: 0, oy: 0 }, 0);
+    const north = scatterDepth(4, 4, { ox: 0, oy: -0.35 }, 0);
+    // Nudged toward the south corner it stands in front of its own tile.
+    expect(south).toBeGreaterThan(centre);
+    expect(north).toBeLessThan(centre);
+    expect(centre).toBe(depthOf(4, 4));
+  });
+
+  it('does not change a tree’s depth when it is nudged along its own diagonal', () => {
+    // East-west on screen moves a tree along the diagonal it already sorts
+    // on, so its depth must not move with it.
+    expect(scatterDepth(4, 4, { ox: 0.4, oy: 0 }, 0)).toBeCloseTo(depthOf(4, 4), 6);
+    expect(scatterDepth(4, 4, { ox: -0.4, oy: 0 }, 0)).toBeCloseTo(depthOf(4, 4), 6);
+  });
+
+  it('separates two people standing on the same tile', () => {
+    // Both round to tile (6, 6); their order must come from where they are,
+    // not from whichever happens to sit earlier in the agent array.
+    expect(depthOf(6.4, 6.4, 0)).toBeGreaterThan(depthOf(5.6, 5.6, 0));
+  });
+});
+
+describe('sampling height under a walker', () => {
+  it('reads the tile height on flat ground', () => {
+    const city = makeFlatCity();
+    expect(sampleElevation(city, 4, 4)).toBe(1);
+    expect(sampleElevation(city, 4.5, 4.5)).toBe(1);
+  });
+
+  it('rises smoothly across a step instead of popping at the boundary', () => {
+    const city = makeFlatCity();
+    city.map.elevation[tileIndex(city, 5, 4)] = 5;
+    // Walking from (4,4) at height 1 to (5,4) at height 5.
+    expect(sampleElevation(city, 4, 4)).toBe(1);
+    expect(sampleElevation(city, 4.5, 4)).toBeCloseTo(3, 6);
+    expect(sampleElevation(city, 5, 4)).toBe(5);
+    // Monotonic all the way across, so the sprite never jumps.
+    let previous = -Infinity;
+    for (let t = 0; t <= 1.0001; t += 0.1) {
+      const height = sampleElevation(city, 4 + t, 4);
+      expect(height).toBeGreaterThanOrEqual(previous);
+      previous = height;
+    }
+  });
+
+  it('stays inside the map at the edges', () => {
+    const city = makeFlatCity();
+    expect(Number.isFinite(sampleElevation(city, 0, 0))).toBe(true);
+    expect(Number.isFinite(sampleElevation(city, city.width - 0.2, city.height - 0.2))).toBe(true);
   });
 });
 
