@@ -245,7 +245,7 @@ export function applyTool(city: CityState, tool: ToolState, tiles: TilePoint[]):
 export function toolHint(tool: ToolState): string {
   switch (tool.kind) {
     case 'road':
-      return 'Drag to lay a street. Two fingers to move the map.';
+      return 'Drag to lay a street. Two fingers, or the right button, move the map.';
     case 'zone':
       return 'Drag to paint a district beside a road.';
     case 'demolish':
@@ -257,4 +257,21 @@ export function toolHint(tool: ToolState): string {
     default:
       return 'Tap anything to inspect it. Drag to look around.';
   }
+}
+
+/** What a cancel — Escape, or a right click — should back out of. */
+export type CancelAction = 'drop-tool' | 'close-panel' | 'none';
+
+/**
+ * A cancel puts the tool down before it closes anything, so backing out of
+ * the catalogue leaves the catalogue open to choose again from.
+ */
+export function resolveCancel(tool: ToolState, panelOpen: boolean): CancelAction {
+  if (tool.kind !== 'inspect') return 'drop-tool';
+  return panelOpen ? 'close-panel' : 'none';
+}
+
+/** Tools that can show what a single tile under the cursor would cost. */
+export function toolPreviewsHover(tool: ToolState): boolean {
+  return tool.kind !== 'inspect';
 }
