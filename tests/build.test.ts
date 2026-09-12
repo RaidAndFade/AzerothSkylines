@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { RoadType, Terrain, Zone } from '@/sim/types';
 import { PARCEL_SIZE, buildingAtTile, isTileOwned, parcelAt, tileIndex } from '@/sim/city';
 import { buyParcel, demolish, evaluatePlacement, placeBuilding, quoteParcel } from '@/sim/build';
+import { wallUpkeepFor } from '@/sim/economy';
+import { wallStats } from '@/sim/walls';
 import { getDef } from '@/data/buildings';
 import { makeFlatCity, mainRoadY, zoneRect } from './helpers';
 
@@ -187,6 +189,16 @@ describe('annexing land', () => {
     expect(result.ok).toBe(false);
     expect(result.reason).toMatch(/gold/i);
     expect(isTileOwned(city, 2 * PARCEL_SIZE + 1, 1)).toBe(false);
+  });
+
+  it('quotes the upkeep the new stonework adds, not just its price', () => {
+    const city = makeFlatCity({ ownedParcels: 2 });
+    const before = wallUpkeepFor(wallStats(city));
+    const quote = quoteParcel(city, 2, 0);
+    expect(quote.upkeep).toBeGreaterThan(0);
+
+    buyParcel(city, 2, 0);
+    expect(wallUpkeepFor(wallStats(city)) - before).toBeCloseTo(quote.upkeep, 5);
   });
 
   it('leaves ownership untouched when only quoting', () => {

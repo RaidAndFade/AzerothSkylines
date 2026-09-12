@@ -280,6 +280,38 @@ export interface Demand {
   industrial: number;
 }
 
+/** One month's books, closed or projected. */
+export interface MonthlyStatement {
+  /** The month the books belong to, for the ledger's own labels. */
+  month: number;
+  year: number;
+  residentialTax: number;
+  commercialTax: number;
+  industrialTax: number;
+  buildingUpkeep: number;
+  roadUpkeep: number;
+  wallUpkeep: number;
+  /** The Crown's instalment, taken ahead of every other bill. */
+  loanRepayment: number;
+  trade: number;
+  /** Everything the month moved, trade included. */
+  net: number;
+  /** The treasury once the month is paid for. */
+  closingGold: number;
+}
+
+/** A loan from the Crown: a fixed advance, repaid in equal instalments. */
+export interface Loan {
+  /** Gold the Crown advanced. */
+  principal: number;
+  /** Gold still owed, interest included. */
+  outstanding: number;
+  /** Taken from the treasury each month until the debt is cleared. */
+  payment: number;
+  /** Instalments still to fall due. */
+  monthsRemaining: number;
+}
+
 /** Running financial figures for the current month. */
 export interface Budget {
   gold: number;
@@ -296,6 +328,12 @@ export interface Budget {
    * this month, drained by `settleMonth` into `lastTrade` for the ledger.
    */
   tradeAccumulator: number;
+  /** Closed months, oldest first, so the panel can show a trend. */
+  history: MonthlyStatement[];
+  /** The Crown's loan, while one is outstanding. */
+  loan: Loan | null;
+  /** Consecutive months closed with the treasury in the red. */
+  arrears: number;
 }
 
 /** Aggregate city statistics recomputed each simulation day. */

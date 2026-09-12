@@ -10,6 +10,7 @@ import { CityState, PARCEL_SIZE, buildingAtTile, buildingCenter, createCity, par
 import { Simulation } from './sim/simulation';
 import { createTrafficQueue } from './sim/agents';
 import { buyParcel } from './sim/build';
+import { takeLoan } from './sim/economy';
 import { RoadType, Zone } from './sim/types';
 import { SAVE_KEY, hasSave, loadFromStorage, saveToStorage } from './sim/save';
 import { Renderer, Overlay, BuildPreview } from './render/renderer';
@@ -18,7 +19,7 @@ import { Hud } from './ui/hud';
 import { InputController } from './ui/input';
 import { ToolState, applyTool, defaultTool, quoteTool, tilesForDrag, toolDraws, toolHint } from './ui/tools';
 import { createTitleScreen, randomValleyName } from './ui/title';
-import { el } from './ui/dom';
+import { el, gold } from './ui/dom';
 
 /** How often the city is written to local storage, in game days. */
 const AUTOSAVE_INTERVAL_DAYS = 90;
@@ -63,6 +64,7 @@ class Game {
         this.overlay = overlay;
       },
       onTaxChange: (zone, rate) => this.setTax(zone, rate),
+      onTakeLoan: () => this.borrow(),
       onBuyParcel: (px, py) => this.buyLand(px, py),
       onNewCity: () => this.newCity(),
       onSave: () => this.save(true),
@@ -198,6 +200,16 @@ class Game {
     this.speed = speed;
     this.simulation.speed = speed === 0 ? 0 : speed === 1 ? 1 : speed === 2 ? 3 : 8;
     this.hud.setSpeed(speed);
+  }
+
+  /** Ask the Crown for the standing offer, and say what it costs. */
+  private borrow(): void {
+    const loan = takeLoan(this.city);
+    if (!loan) {
+      this.hud.showToast('The Crown will not lend twice at once', 'bad');
+      return;
+    }
+    this.hud.showToast(`The Crown advances ${gold(loan.principal)}`, 'good');
   }
 
   private setTax(zone: Zone, rate: number): void {

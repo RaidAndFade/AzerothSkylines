@@ -24,7 +24,8 @@ import {
 import { getDef } from '../data/buildings';
 import { isTileBuildable } from './terrain';
 import { computeRoadComponents } from './trade';
-import { planWalls, applyWalls } from './walls';
+import { planWalls, applyWalls, countSegments, wallStats } from './walls';
+import { wallUpkeepFor } from './economy';
 import { isGrown } from './growth';
 
 export interface PlacementCheck {
@@ -206,15 +207,21 @@ export interface ParcelQuote {
   /** Price of extending the curtain wall around it. */
   masonry: number;
   total: number;
+  /**
+   * Gold a month the new stonework adds to the upkeep bill — the part of the
+   * price that goes on being paid. Negative when the purchase encloses more
+   * wall than it raises.
+   */
+  upkeep: number;
 }
 
 /** Price up annexing a parcel, including the stonework it will need. */
 export function quoteParcel(city: CityState, px: number, py: number): ParcelQuote {
   const parcel = parcelAt(city, px, py);
-  if (!parcel) return { ok: false, reason: 'No such land', land: 0, masonry: 0, total: 0 };
-  if (parcel.owned) return { ok: false, reason: 'Already yours', land: 0, masonry: 0, total: 0 };
+  if (!parcel) return { ok: false, reason: 'No such land', land: 0, masonry: 0, total: 0, upkeep: 0 };
+  if (parcel.owned) return { ok: false, reason: 'Already yours', land: 0, masonry: 0, total: 0, upkeep: 0 };
   if (!parcel.settleable) {
-    return { ok: false, reason: 'Nothing there but water and stone', land: 0, masonry: 0, total: 0 };
+    return { ok: false, reason: 'Nothing there but water and stone', land: 0, masonry: 0, total: 0, upkeep: 0 };
   }
 
   const adjacent = [
@@ -224,7 +231,7 @@ export function quoteParcel(city: CityState, px: number, py: number): ParcelQuot
     parcelAt(city, px, py + 1),
   ].some((p) => p?.owned);
   if (!adjacent) {
-    return { ok: false, reason: 'Must adjoin land you already hold', land: 0, masonry: 0, total: 0 };
+    return { ok: false, reason: 'Must adjoin land you already hold', land: 0, masonry: 0, total: 0, upkeep: 0 };
   }
 
   // Plan the wall as if the parcel were already ours, to quote the masonry.
@@ -234,7 +241,10 @@ export function quoteParcel(city: CityState, px: number, py: number): ParcelQuot
 
   const land = parcel.price;
   const masonry = plan.cost;
-  return { ok: true, land, masonry, total: land + masonry };
+  // The wall the city would be left holding, against the one it holds now:
+  // stonework made interior by the purchase comes down and stops costing.
+  const upkeep = wallUpkeepFor(countSegments(plan.segments)) - wallUpkeepFor(wallStats(city));
+  return { ok: true, land, masonry, total: land + masonry, upkeep };
 }
 
 /** Annex a parcel and push the walls out to enclose it. */

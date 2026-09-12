@@ -6,6 +6,7 @@ import { clamp, clamp01, lerp } from '../core/math';
 import { Service, Terrain, RoadType, isWater } from './types';
 import { CityState, buildingCenter, tileIndex, treeDensityAt } from './city';
 import { getDef } from '../data/buildings';
+import { serviceAusterity } from './economy';
 import { MAX_ELEVATION } from './terrain';
 
 /** Services that radiate from a building rather than running under streets. */
@@ -23,6 +24,11 @@ export const RADIUS_SERVICES: readonly Service[] = [
 export function computeServiceCoverage(city: CityState): void {
   for (const service of RADIUS_SERVICES) city.coverage[service].fill(0);
 
+  // Wages are paid out of the same treasury as everything else. Water still
+  // runs under the streets when the city is broke, but a guard post nobody
+  // has paid stands empty.
+  const austerity = serviceAusterity(city);
+
   for (const building of city.buildings.values()) {
     if (building.abandoned) continue;
     const def = getDef(building.defId);
@@ -37,7 +43,7 @@ export function computeServiceCoverage(city: CityState): void {
       if (!spec) continue;
       const field = city.coverage[key];
       const radius = spec.radius;
-      const strength = spec.strength * staffing;
+      const strength = spec.strength * staffing * austerity;
       const r = Math.ceil(radius);
       for (let dy = -r; dy <= r; dy++) {
         for (let dx = -r; dx <= r; dx++) {
