@@ -3,9 +3,22 @@
  * actually grows, employs, supplies and pays for itself.
  */
 import { describe, expect, it } from 'vitest';
-import { RoadType, Service, Zone } from '@/sim/types';
-import { CityState, createCity, tileIndex } from '@/sim/city';
-import { Simulation } from '@/sim/simulation';
+import { ALL_SERVICES, MONTH_NAMES, RoadType, Service, Zone } from '@/sim/types';
+import {
+  CityState,
+  JOURNAL_LIMIT,
+  createCity,
+  logEvent,
+  markJournalRead,
+  tileIndex,
+  unreadJournalCount,
+} from '@/sim/city';
+import {
+  COMPLAINT_REPEAT_DAYS,
+  Simulation,
+  announceProgress,
+  reviewComplaints,
+} from '@/sim/simulation';
 import { createTrafficQueue } from '@/sim/agents';
 import { placeBuilding } from '@/sim/build';
 import { getDef } from '@/data/buildings';
@@ -257,5 +270,134 @@ describe('a freshly generated valley', () => {
         sim.update(5);
       }).not.toThrow();
     }
+  });
+});
+
+describe('the Chronicle', () => {
+  /**
+   * A town with houses and streets but no shops, so commerce coverage sits
+   * under its threshold for the whole run and never recovers.
+   */
+  function starvedTown(): { city: CityState; sim: Simulation } {
+    const city = makeFlatCity({ ownedParcels: 3, size: 48, gold: 200000 });
+    ownParcelBlock(city, 3, 3);
+    const y = mainRoadY(3);
+    for (let x = 0; x < 24; x++) city.roads[tileIndex(city, x, y)] = RoadType.Cobble;
+    zoneRect(city, Zone.Residential, 1, y + 1, 20, 1);
+    zoneRect(city, Zone.Residential, 1, y - 1, 20, 1);
+    const sim = new Simulation(city, createTrafficQueue());
+    return { city, sim };
+  }
+
+  function entriesSaying(city: CityState, fragment: string): number {
+    return city.journal.filter((entry) => entry.text.includes(fragment)).length;
+  }
+
+  it('raises a standing shortage at most once a season', () => {
+    const { city, sim } = starvedTown();
+    for (let day = 0; day < 300; day++) sim.runDay();
+
+    // Ten-day reviews over 300 days used to mean thirty identical lines.
+    const complaints = city.journal.filter((entry) => entry.tone === 'bad');
+    expect(complaints.length).toBeLessThanOrEqual(Math.ceil(300 / COMPLAINT_REPEAT_DAYS) + 1);
+    for (const complaint of complaints) {
+      expect(entriesSaying(city, complaint.text)).toBeLessThanOrEqual(
+        Math.ceil(300 / COMPLAINT_REPEAT_DAYS) + 1,
+      );
+    }
+  });
+
+  it('says so when a shortage is put right', () => {
+    const city = makeFlatCity({ ownedParcels: 3, size: 48, gold: 200000 });
+    ownParcelBlock(city, 3, 3);
+    city.stats.population = 400;
+    // Water is by far the worst, so it is the one that gets raised.
+    for (const service of ALL_SERVICES) city.stats.services[service] = 0.9;
+    city.stats.services[Service.Water] = 0.1;
+    reviewComplaints(city);
+    expect(city.journal.at(-1)?.tone).toBe('bad');
+    expect(city.journal.at(-1)?.text).toMatch(/wells/i);
+    expect(city.complaints.water).toBeDefined();
+
+    city.stats.services[Service.Water] = 0.95;
+    reviewComplaints(city);
+    expect(entriesSaying(city, 'draws clean water')).toBe(1);
+    expect(city.complaints.water).toBeUndefined();
+  });
+
+  it('does not flip between complaint and relief on the threshold', () => {
+    const city = makeFlatCity();
+    city.stats.population = 400;
+    for (const service of ALL_SERVICES) city.stats.services[service] = 0.9;
+
+    // Water hovers either side of its threshold for two hundred days. Neither
+    // crossing is decisive enough to count as put right, so relief is never
+    // announced and the grievance is only ever re-raised on the season.
+    for (let i = 0; i < 20; i++) {
+      city.stats.services[Service.Water] = i % 2 === 0 ? 0.56 : 0.54;
+      reviewComplaints(city);
+      city.clock.totalDays += 10;
+    }
+    expect(city.journal.filter((entry) => entry.tone === 'good')).toHaveLength(0);
+    expect(city.journal.filter((entry) => entry.tone === 'bad').length).toBeLessThanOrEqual(3);
+  });
+
+  it('announces a milestone once, and never again', () => {
+    const city = makeFlatCity();
+    city.stats.population = 200;
+    announceProgress(city);
+    expect(entriesSaying(city, 'now a Hamlet')).toBe(1);
+    expect(entriesSaying(city, 'now a Village')).toBe(1);
+
+    // Passing it again, and falling back through it, change nothing.
+    for (const population of [200, 120, 60, 205]) {
+      city.stats.population = population;
+      announceProgress(city);
+    }
+    expect(entriesSaying(city, 'now a Hamlet')).toBe(1);
+    expect(entriesSaying(city, 'now a Village')).toBe(1);
+  });
+
+  it('says when a gated building becomes available', () => {
+    const city = makeFlatCity();
+    city.stats.population = 119;
+    announceProgress(city);
+    expect(entriesSaying(city, "Lion's Pride Inn")).toBe(0);
+
+    city.stats.population = 121;
+    announceProgress(city);
+    expect(entriesSaying(city, 'may now be built')).toBe(1);
+    expect(entriesSaying(city, "Lion's Pride Inn")).toBe(1);
+
+    city.stats.population = 160;
+    announceProgress(city);
+    expect(entriesSaying(city, "Lion's Pride Inn")).toBe(1);
+    expect(entriesSaying(city, 'may now be built')).toBe(2);
+  });
+
+  it('stamps entries with the calendar, and marks them unread', () => {
+    const city = makeFlatCity();
+    city.clock.day = 24;
+    city.clock.month = 4;
+    city.clock.year = 26;
+    logEvent(city, 'A thing happened.', 'bad');
+
+    const entry = city.journal.at(-1);
+    expect(entry?.dayOfMonth).toBe(24);
+    expect(entry?.month).toBe(4);
+    expect(entry?.year).toBe(26);
+    expect(MONTH_NAMES[(entry?.month ?? 1) - 1]).toBe('Bloomrise');
+
+    expect(unreadJournalCount(city, 'bad')).toBe(1);
+    markJournalRead(city);
+    expect(unreadJournalCount(city)).toBe(0);
+  });
+
+  it('keeps a bounded number of entries', () => {
+    const city = makeFlatCity();
+    for (let i = 0; i < JOURNAL_LIMIT + 40; i++) logEvent(city, `Entry ${i}`);
+    expect(city.journal.length).toBe(JOURNAL_LIMIT);
+    // The cap drops the oldest, not the newest.
+    expect(city.journal.at(-1)?.text).toBe(`Entry ${JOURNAL_LIMIT + 39}`);
   });
 });

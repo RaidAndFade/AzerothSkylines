@@ -289,6 +289,7 @@ body {
 }
 
 .tool {
+  position: relative;
   flex: 0 0 auto;
   width: 54px;
   height: 52px;
@@ -318,6 +319,23 @@ body {
   background: linear-gradient(180deg, #6E5423, #3A2A10);
   color: var(--gold);
   box-shadow: 0 0 0 1px rgba(232, 190, 85, 0.35), 0 0 12px rgba(232, 190, 85, 0.25);
+}
+
+.tool .badge {
+  position: absolute;
+  top: 3px;
+  right: 4px;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 3px;
+  border-radius: 7px;
+  background: var(--bad);
+  color: #FFF1EC;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 14px;
+  text-align: center;
+  box-shadow: 0 0 6px rgba(192, 83, 63, 0.6);
 }
 
 .tool.residential.active { border-color: var(--residential); color: #A8E0A0; }
@@ -594,6 +612,7 @@ body {
 
 .journal-entry.good { border-left-color: var(--good); }
 .journal-entry.bad { border-left-color: var(--bad); }
+.journal-entry.unread { background: rgba(44, 30, 12, 0.75); }
 
 .journal-entry .when {
   display: block;
