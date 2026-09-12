@@ -33,7 +33,7 @@ const tool = (l) => page.locator(`#toolbar .tool:has-text("${l}")`).first();
 const close = async () => { if (await page.locator('#panel.open').count()) { await page.locator('#panel .panel-head .icon-button').click(); await page.waitForTimeout(100); } };
 
 const { x0, y0 } = owned;
-await page.evaluate(([a, b]) => { const c = window.azerothSkylines.camera; c.zoom = 0.6; c.centreOnTile(a, b, 0); }, [x0 + 8, y0 + 8]);
+await page.evaluate(([a, b]) => { const c = window.azerothSkylines.camera; c.zoom = 0.6; c.centreOnTile(a, b); }, [x0 + 8, y0 + 8]);
 await tool('Roads').click(); await page.waitForTimeout(150); await close();
 for (const y of [2, 6, 10, 14]) await drag([x0 + 1, y0 + y], [x0 + 14, y0 + y]);
 for (const x of [2, 6, 10, 14]) await drag([x0 + x, y0 + 1], [x0 + x, y0 + 14]);
@@ -46,7 +46,7 @@ await page.locator('#speed button').nth(3).click();
 await page.waitForTimeout(22000);
 
 async function measure(zoom, label) {
-  await page.evaluate(([z, a, b]) => { const c = window.azerothSkylines.camera; c.zoom = z; c.centreOnTile(a, b, 0); }, [zoom, x0 + 8, y0 + 8]);
+  await page.evaluate(([z, a, b]) => { const c = window.azerothSkylines.camera; c.zoom = z; c.centreOnTile(a, b); }, [zoom, x0 + 8, y0 + 8]);
   await page.waitForTimeout(700);
   const r = await page.evaluate(() => new Promise((resolve) => {
     const times = [];

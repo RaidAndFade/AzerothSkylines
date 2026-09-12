@@ -1,41 +1,60 @@
 /**
  * The scene renderer.
  *
- * Ground is painted first as batched diamonds, then everything that stands
- * on it is gathered into one list, sorted by depth and drawn nearest last,
- * so a cottage correctly hides the hedge behind it and the wall hides the
- * cottage.
+ * The valley is drawn as a real three-dimensional place: one continuous
+ * ground surface with the town standing on it, lit by a low sun through a
+ * single shadow map, hazed with distance, and turned round whichever way
+ * the player wants to look at it.
+ *
+ * Work is divided into chunks of sixteen tiles. Ground and water are built
+ * once; roads, buildings, walls and woodland are rebuilt only for the
+ * chunks the simulation has touched. Building is budgeted per frame, so a
+ * chunk coming into view never costs a visible hitch.
  */
-import { ELEVATION_STEP, HALF_HEIGHT, HALF_WIDTH, depthOf } from './iso';
-import { PALETTE, mix, withAlpha } from './palette';
-import { Camera } from './camera';
-import { DETAIL_ZOOM, FLORA_ZOOM, TileRange, ViewRect, drawTerrain, strokeTile, strokeTileRect } from './terrainLayer';
-import { GroundField, buildGroundField } from './groundTexture';
-import { getBuildingSprite } from './buildingSprites';
-import { Sprite, getAgentSprite, getPropSprite, getTreeSprite, getWallSprite } from './propSprites';
-import { AgentKind, Building, RoadType, Service, Terrain, Zone, isWater } from '../sim/types';
-import { CityState, PARCEL_SIZE, standingTreesOnTile, tileIndex } from '../sim/city';
+import { AgentKind, Building, RoadType, Zone } from '../sim/types';
+import {
+  TERRAIN_HEIGHT,
+  WATER_HEIGHT,
+  WorldMap,
+  surfaceHeight,
+} from '../sim/terrain';
+import { CityState, buildingCenter, standingTreesOnTile, tileIndex } from '../sim/city';
 import { propsOnTile } from '../sim/terrain';
 import { getDef } from '../data/buildings';
+import { Batch, Program, createProgram } from './glx';
+import {
+  GROUND_FRAGMENT,
+  OBJECT_FRAGMENT,
+  OBJECT_VERTEX,
+  SHADOW_FRAGMENT,
+  SHADOW_VERTEX,
+  SKY_FRAGMENT,
+  SKY_VERTEX,
+  WATER_FRAGMENT,
+} from './shaders';
+import { Camera, MAX_DISTANCE, MIN_DISTANCE, marchToGround } from './camera';
+import { Mat4, boxInFrustum, frustumPlanes, lookAt, mat4, multiply, ortho, normalise } from './mat4';
+import { MeshBuilder, colour } from './meshBuilder';
+import {
+  CHUNK_TILES,
+  FAR_SUBDIVISIONS,
+  GroundPalette,
+  NEAR_SUBDIVISIONS,
+  WORLD_MARGIN,
+  buildTerrainChunk,
+  buildWaterChunk,
+} from './terrainMesh';
+import { addRoad } from './roadMesh';
+import { addBuilding, placementOf } from './buildingMesh';
+import { addWall } from './wallMesh';
+import { addAgent } from './agentMesh';
+import { propTemplate, treeHeight, treeTemplate } from './natureMesh';
+import { DecalMap, DecalState, Overlay, BuildPreview } from './decals';
+import { PALETTE } from './palette';
+import { hash2 } from '../core/rng';
+import { clamp } from '../core/math';
 
-export type Overlay =
-  | 'none'
-  | 'water'
-  | 'sewage'
-  | 'safety'
-  | 'faith'
-  | 'leisure'
-  | 'commerce'
-  | 'landValue'
-  | 'pollution'
-  | 'land';
-
-export interface BuildPreview {
-  /** Tiles to highlight, with whether each is a legal placement. */
-  tiles: { x: number; y: number; ok: boolean }[];
-  /** Optional footprint rectangle to outline. */
-  rect?: { x: number; y: number; width: number; height: number; ok: boolean };
-}
+export type { Overlay, BuildPreview };
 
 export interface RenderOptions {
   /** Seconds since the game started, for animation. */
@@ -49,556 +68,744 @@ export interface RenderOptions {
   highlightParcel: { px: number; py: number } | null;
 }
 
-const SKY_TOP = '#7FB3D9';
-const SKY_BOTTOM = '#CFE4EE';
+/** Direction toward the sun: low, and out of the south-west. */
+const SUN = normalise({ x: -0.58, y: 0.57, z: 0.58 });
+const SUN_COLOUR = [1.28, 1.16, 0.96];
+const SKY_LIGHT = [0.34, 0.4, 0.48];
+const BOUNCE_LIGHT = [0.2, 0.19, 0.14];
+const ZENITH = [0.36, 0.49, 0.66];
+const HORIZON = [0.74, 0.77, 0.76];
+const FOG_COLOUR = [0.72, 0.75, 0.75];
 
+/** How far from the camera full-detail woodland is built. */
+const NEAR_WOOD = 34;
+/** How much ground the shadow map covers, relative to the camera's range. */
+const SHADOW_COVERAGE = 1.15;
+const MIN_SHADOW_RADIUS = 14;
+const MAX_SHADOW_RADIUS = 90;
 /**
- * One sprite to paint, with the depth it sorts at.
- *
- * Depth is an explicit function of world position, height and footprint
- * rather than something the loop nesting happens to produce, so buildings,
- * trees and people all sort against each other rather than only within
- * their own kind.
+ * How much chunk building may happen in one frame, so nothing hitches.
+ * Measured in cost rather than in chunks, because the two kinds are not
+ * remotely alike: a chunk of the valley is a thousand vertices with ambient
+ * occlusion sampled at each, and a chunk of the country out toward the
+ * horizon is under three hundred with none. So a frame lays down either a
+ * few of the former or a great many of the latter, and the horizon closes
+ * up in the first moments rather than creeping outward.
  */
-interface DrawItem {
-  depth: number;
-  /** Screen position the sprite is anchored at. */
-  x: number;
-  y: number;
-  sprite: Sprite;
-  /** Trees and ground clutter carry their own scale; everything else 1. */
-  scale: number;
-  /** Set for buildings, so the selection outline and warning draw with it. */
-  building: Building | null;
-}
+const BUILD_BUDGET = 48;
+const FINE_COST = 16;
+const COARSE_COST = 1;
 
-function byDepth(a: DrawItem, b: DrawItem): number {
-  return a.depth - b.depth;
-}
-
-/**
- * Depth a building sorts at.
- *
- * A building is emitted once, from its anchor — the footprint's north-west
- * corner, and so its *smallest* x + y. Sorting it there puts it behind
- * anything standing on the tiles it covers, which is backwards, so it sorts
- * on its far corner instead. Where it draws is unchanged.
- */
-export function buildingDepth(
-  building: { x: number; y: number; width: number; height: number },
-  elevation: number,
-): number {
-  return depthOf(building.x + building.width - 1, building.y + building.height - 1, elevation);
-}
-
-/**
- * Depth a tree or a tuft of ground clutter sorts at, including the sub-tile
- * offset that decides where it is actually standing.
- *
- * The offset is given in screen pixels; inverting the projection turns it
- * back into a tile position. Only the north-south part moves something in
- * depth — nudging it east or west slides it along its own diagonal.
- */
-export function scatterDepth(
-  x: number,
-  y: number,
-  scatter: { ox: number; oy: number },
-  elevation: number,
-): number {
-  return depthOf(x + (scatter.oy + scatter.ox) / 2, y + (scatter.oy - scatter.ox) / 2, elevation);
-}
-
-/**
- * Height under a point given in fractional tile coordinates, interpolated so
- * that someone walking between two elevation steps rises smoothly instead of
- * popping a full step at the tile boundary.
- */
-export function sampleElevation(city: CityState, x: number, y: number): number {
-  const width = city.width;
-  const height = city.height;
-  const elevation = city.map.elevation;
-  const x0 = Math.floor(x);
-  const y0 = Math.floor(y);
-  const fx = x - x0;
-  const fy = y - y0;
-  const lx = x0 < 0 ? 0 : x0 > width - 1 ? width - 1 : x0;
-  const hx = x0 + 1 < 0 ? 0 : x0 + 1 > width - 1 ? width - 1 : x0 + 1;
-  const ly = y0 < 0 ? 0 : y0 > height - 1 ? height - 1 : y0;
-  const hy = y0 + 1 < 0 ? 0 : y0 + 1 > height - 1 ? height - 1 : y0 + 1;
-  const topLeft = elevation[ly * width + lx];
-  const topRight = elevation[ly * width + hx];
-  const bottomLeft = elevation[hy * width + lx];
-  const bottomRight = elevation[hy * width + hx];
-  const top = topLeft + (topRight - topLeft) * fx;
-  const bottom = bottomLeft + (bottomRight - bottomLeft) * fx;
-  return top + (bottom - top) * fy;
+interface Chunk {
+  cx: number;
+  cz: number;
+  /** Whether the chunk holds any of the playable map. */
+  inMap: boolean;
+  /** Distant country, built at reduced resolution. */
+  coarse: boolean;
+  ground: Batch | null;
+  water: Batch | null;
+  structures: Batch | null;
+  nature: Batch | null;
+  /** Whether the woodland in this chunk is built at full detail. */
+  natureDetail: boolean;
+  builtGround: boolean;
+  contentDirty: boolean;
+  minX: number;
+  minZ: number;
+  maxX: number;
+  maxZ: number;
+  minY: number;
+  maxY: number;
 }
 
 export class Renderer {
   readonly canvas: HTMLCanvasElement;
   readonly camera = new Camera();
-  private ctx: CanvasRenderingContext2D;
-  private pixelRatio = 1;
-  /** Rebuilt only on resize; creating it per frame was pure waste. */
-  private sky: CanvasGradient | null = null;
-  /** The baked ground colour field, rebuilt only when the valley changes. */
-  private ground: GroundField | null = null;
-  private groundSeed = Number.NaN;
   /** Frame time in milliseconds, smoothed, for the debug readout. */
   frameTime = 0;
-  /** This frame's sprites, rebuilt each frame and sorted by depth. */
-  private drawItems: DrawItem[] = [];
-  /** Backing store for the above, kept between frames and never shrunk. */
-  private itemPool: DrawItem[] = [];
+  private drawnChunks = 0;
+
+  private readonly gl: WebGL2RenderingContext;
+  private readonly groundProgram: Program;
+  private readonly objectProgram: Program;
+  private readonly waterProgram: Program;
+  private readonly shadowProgram: Program;
+  private readonly skyProgram: Program;
+
+  private chunks: Chunk[] = [];
+  private chunksWide = 0;
+  private chunkMinX = 0;
+  private chunkMinZ = 0;
+  private groundPalette: GroundPalette | null = null;
+  private mapSeed = Number.NaN;
+
+  private readonly scratch = new MeshBuilder(4096, 8192);
+  private readonly agentMesh = new MeshBuilder(2048, 4096);
+  private agentBatch: Batch | null = null;
+  private decals: DecalMap | null = null;
+  private decalTexture: WebGLTexture | null = null;
+  private decalRevision = -1;
+  private zoneRevision = 0;
+
+  private shadowTexture: WebGLTexture | null = null;
+  private shadowBuffer: WebGLFramebuffer | null = null;
+  private shadowSize = 2048;
+  private shadowRadius = 40;
+  private readonly shadowMatrix: Mat4 = mat4();
+  private readonly lightView: Mat4 = mat4();
+  private readonly lightProjection: Mat4 = mat4();
+  private readonly planes = new Float32Array(24);
+
+  private skyVao: WebGLVertexArrayObject | null = null;
+  private readonly inverseViewProjection: Mat4 = mat4();
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
-    const ctx = canvas.getContext('2d', { alpha: false });
-    if (!ctx) throw new Error('2D canvas is unavailable');
-    this.ctx = ctx;
+    const gl = canvas.getContext('webgl2', {
+      alpha: false,
+      antialias: true,
+      depth: true,
+      powerPreference: 'high-performance',
+    });
+    if (!gl) throw new Error('This browser cannot show the valley: WebGL 2 is unavailable.');
+    this.gl = gl;
+
+    this.groundProgram = createProgram(gl, OBJECT_VERTEX, GROUND_FRAGMENT);
+    this.objectProgram = createProgram(gl, OBJECT_VERTEX, OBJECT_FRAGMENT);
+    this.waterProgram = createProgram(gl, OBJECT_VERTEX, WATER_FRAGMENT);
+    this.shadowProgram = createProgram(gl, SHADOW_VERTEX, SHADOW_FRAGMENT);
+    this.skyProgram = createProgram(gl, SKY_VERTEX, SKY_FRAGMENT);
+
+    gl.enable(gl.DEPTH_TEST);
+    gl.enable(gl.CULL_FACE);
+    gl.cullFace(gl.BACK);
+    gl.frontFace(gl.CCW);
+    this.createShadowMap();
+    this.createSkyQuad();
   }
 
   resize(width: number, height: number, pixelRatio: number): void {
-    this.pixelRatio = pixelRatio;
-    this.canvas.width = Math.round(width * pixelRatio);
-    this.canvas.height = Math.round(height * pixelRatio);
+    this.canvas.width = Math.max(1, Math.round(width * pixelRatio));
+    this.canvas.height = Math.max(1, Math.round(height * pixelRatio));
     this.canvas.style.width = `${width}px`;
     this.canvas.style.height = `${height}px`;
     this.camera.resize(width, height);
-    this.sky = null;
   }
+
+  // --- set-up ---------------------------------------------------------------
+
+  private createShadowMap(): void {
+    const gl = this.gl;
+    // Fall back to a smaller map on hardware that will not give us a large one.
+    const limit = gl.getParameter(gl.MAX_TEXTURE_SIZE) as number;
+    this.shadowSize = Math.min(this.shadowSize, limit);
+    const texture = gl.createTexture();
+    const buffer = gl.createFramebuffer();
+    if (!texture || !buffer) throw new Error('Could not allocate the shadow map');
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.DEPTH_COMPONENT24, this.shadowSize, this.shadowSize);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, buffer);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.TEXTURE_2D, texture, 0);
+    gl.drawBuffers([gl.NONE]);
+    gl.readBuffer(gl.NONE);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this.shadowTexture = texture;
+    this.shadowBuffer = buffer;
+  }
+
+  private createSkyQuad(): void {
+    const gl = this.gl;
+    const vao = gl.createVertexArray();
+    const buffer = gl.createBuffer();
+    if (!vao || !buffer) throw new Error('Could not allocate the sky');
+    gl.bindVertexArray(vao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+    gl.bufferData(
+      gl.ARRAY_BUFFER,
+      new Float32Array([-1, -1, 0, 3, -1, 0, -1, 3, 0]),
+      gl.STATIC_DRAW,
+    );
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 12, 0);
+    gl.bindVertexArray(null);
+    this.skyVao = vao;
+  }
+
+  /** Throw away every batch, for a new valley. */
+  private resetScene(city: CityState): void {
+    for (const chunk of this.chunks) {
+      chunk.ground?.dispose();
+      chunk.water?.dispose();
+      chunk.structures?.dispose();
+      chunk.nature?.dispose();
+    }
+    this.chunks = [];
+
+    this.chunkMinX = Math.floor(-WORLD_MARGIN / CHUNK_TILES);
+    this.chunkMinZ = Math.floor(-WORLD_MARGIN / CHUNK_TILES);
+    const maxX = Math.ceil((city.width + WORLD_MARGIN) / CHUNK_TILES);
+    const maxZ = Math.ceil((city.height + WORLD_MARGIN) / CHUNK_TILES);
+    this.chunksWide = maxX - this.chunkMinX;
+    const chunksHigh = maxZ - this.chunkMinZ;
+
+    for (let z = 0; z < chunksHigh; z++) {
+      for (let x = 0; x < this.chunksWide; x++) {
+        const cx = this.chunkMinX + x;
+        const cz = this.chunkMinZ + z;
+        const minX = cx * CHUNK_TILES;
+        const minZ = cz * CHUNK_TILES;
+        const inMap =
+          minX < city.width && minZ < city.height && minX + CHUNK_TILES > 0 && minZ + CHUNK_TILES > 0;
+        // A ring of full-resolution chunks just outside the valley, so the
+        // change in resolution never happens where anyone is looking closely.
+        const near =
+          minX < city.width + CHUNK_TILES * 2 &&
+          minZ < city.height + CHUNK_TILES * 2 &&
+          minX + CHUNK_TILES > -CHUNK_TILES * 2 &&
+          minZ + CHUNK_TILES > -CHUNK_TILES * 2;
+        this.chunks.push({
+          cx,
+          cz,
+          inMap,
+          coarse: !near,
+          ground: null,
+          water: null,
+          structures: null,
+          nature: null,
+          natureDetail: false,
+          builtGround: false,
+          contentDirty: true,
+          minX,
+          minZ,
+          maxX: minX + CHUNK_TILES,
+          maxZ: minZ + CHUNK_TILES,
+          minY: 0,
+          maxY: TERRAIN_HEIGHT + 12,
+        });
+      }
+    }
+
+    this.groundPalette = new GroundPalette(city.map);
+    this.decals = new DecalMap(city);
+    this.decalRevision = -1;
+    this.zoneRevision++;
+    this.mapSeed = city.map.seed;
+    this.camera.setWorldBounds(city.width, city.height, city.map);
+  }
+
+  private chunkAt(cx: number, cz: number): Chunk | null {
+    const x = cx - this.chunkMinX;
+    const z = cz - this.chunkMinZ;
+    if (x < 0 || z < 0 || x >= this.chunksWide) return null;
+    const index = z * this.chunksWide + x;
+    return this.chunks[index] ?? null;
+  }
+
+  // --- the frame ------------------------------------------------------------
 
   render(city: CityState, options: RenderOptions): void {
     const started = performance.now();
-    const ctx = this.ctx;
+    const gl = this.gl;
 
-    ctx.setTransform(this.pixelRatio, 0, 0, this.pixelRatio, 0, 0);
+    if (this.mapSeed !== city.map.seed || this.chunks.length === 0) this.resetScene(city);
+    this.consumeDirtyTiles(city);
+    this.camera.update();
+
+    frustumPlanes(this.camera.viewProjection, this.planes);
+    const visible = this.collectVisible(city);
+    this.drawnChunks = visible.length;
+    this.buildAgents(city, options.time);
+    this.updateDecals(city, options);
+    this.fitShadowMap();
+
+    // 1. Depth from the sun's point of view.
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.shadowBuffer);
+    gl.viewport(0, 0, this.shadowSize, this.shadowSize);
+    gl.clear(gl.DEPTH_BUFFER_BIT);
+    gl.useProgram(this.shadowProgram.program);
+    gl.uniformMatrix4fv(this.shadowProgram.uniform('uViewProjection'), false, this.shadowMatrix);
+    // Front faces cast, which keeps the acne on surfaces that are in shadow anyway.
+    gl.cullFace(gl.FRONT);
+    for (const chunk of visible) {
+      if (!this.nearShadowCaster(chunk)) continue;
+      chunk.ground?.draw();
+      chunk.structures?.draw();
+      chunk.nature?.draw();
+    }
+    this.agentBatch?.draw();
+    gl.cullFace(gl.BACK);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+
+    // 2. The valley itself.
+    gl.viewport(0, 0, this.canvas.width, this.canvas.height);
+    gl.clearColor(FOG_COLOUR[0], FOG_COLOUR[1], FOG_COLOUR[2], 1);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
     this.drawSky();
 
-    ctx.save();
-    this.camera.applyTransform(ctx);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.shadowTexture);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, this.decalTexture);
 
-    // Computed once and passed down: culling ran per tile, and each call
-    // allocated a fresh rectangle.
-    const view = this.camera.visibleWorldRect();
-    const range = this.camera.visibleTileRect(city.width, city.height);
-    drawTerrain(ctx, city, this.groundField(city), view, range, {
-      time: options.time,
-      showZones: options.showZones,
-      zoom: this.camera.zoom,
-    });
+    gl.useProgram(this.groundProgram.program);
+    this.setSceneUniforms(this.groundProgram);
+    gl.uniform1i(this.groundProgram.uniform('uDecal'), 1);
+    gl.uniform2f(this.groundProgram.uniform('uMapSize'), city.width, city.height);
+    for (const chunk of visible) chunk.ground?.draw();
 
-    if (options.overlay !== 'none') this.drawOverlay(city, range, options.overlay);
+    gl.useProgram(this.objectProgram.program);
+    this.setSceneUniforms(this.objectProgram);
+    for (const chunk of visible) {
+      chunk.structures?.draw();
+      chunk.nature?.draw();
+    }
+    this.agentBatch?.draw();
 
-    this.drawObjects(city, view, range, options);
-    this.drawParcelGrid(city, range, options);
-    this.drawPreview(city, options);
+    // 3. Water last, because it is see-through.
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.depthMask(false);
+    gl.disable(gl.CULL_FACE);
+    gl.useProgram(this.waterProgram.program);
+    this.setSceneUniforms(this.waterProgram);
+    gl.uniform1f(this.waterProgram.uniform('uTime'), options.time);
+    for (const chunk of visible) chunk.water?.draw();
+    gl.enable(gl.CULL_FACE);
+    gl.depthMask(true);
+    gl.disable(gl.BLEND);
+    gl.bindVertexArray(null);
 
-    ctx.restore();
-
-    const elapsed = performance.now() - started;
-    this.frameTime = this.frameTime * 0.9 + elapsed * 0.1;
+    this.frameTime = this.frameTime * 0.9 + (performance.now() - started) * 0.1;
   }
 
-  /** The colour field for this valley, baked on first sight. */
-  private groundField(city: CityState): GroundField {
-    if (!this.ground || this.groundSeed !== city.map.seed) {
-      this.ground = buildGroundField(city);
-      this.groundSeed = city.map.seed;
-    }
-    return this.ground;
+  private setSceneUniforms(program: Program): void {
+    const gl = this.gl;
+    gl.uniformMatrix4fv(program.uniform('uViewProjection'), false, this.camera.viewProjection);
+    gl.uniformMatrix4fv(program.uniform('uShadowMatrix'), false, this.shadowMatrix);
+    gl.uniform3f(program.uniform('uSunDirection'), SUN.x, SUN.y, SUN.z);
+    gl.uniform3fv(program.uniform('uSunColor'), SUN_COLOUR);
+    gl.uniform3fv(program.uniform('uSkyColor'), SKY_LIGHT);
+    gl.uniform3fv(program.uniform('uGroundColor'), BOUNCE_LIGHT);
+    gl.uniform3fv(program.uniform('uFogColor'), FOG_COLOUR);
+    // Haze thickens as the view pulls back, so the far country softens away
+    // before the eye can find where it stops — but only enough to close the
+    // horizon, not enough to whiten the middle distance. This is haze over a
+    // valley, not weather.
+    const pullback = (this.camera.distance - MIN_DISTANCE) / (MAX_DISTANCE - MIN_DISTANCE);
+    gl.uniform1f(program.uniform('uFogDensity'), 0.002 + 0.0032 * pullback ** 1.4);
+    gl.uniform3f(
+      program.uniform('uCameraPosition'),
+      this.camera.eye.x,
+      this.camera.eye.y,
+      this.camera.eye.z,
+    );
+    gl.uniform1i(program.uniform('uShadowMap'), 0);
+    gl.uniform1f(program.uniform('uShadowTexel'), 1 / this.shadowSize);
+    gl.uniform4f(program.uniform('uTint'), 0, 0, 0, 0);
   }
 
   private drawSky(): void {
-    const ctx = this.ctx;
-    if (!this.sky) {
-      const gradient = ctx.createLinearGradient(0, 0, 0, this.camera.viewHeight);
-      gradient.addColorStop(0, SKY_TOP);
-      gradient.addColorStop(1, SKY_BOTTOM);
-      this.sky = gradient;
-    }
-    ctx.fillStyle = this.sky;
-    ctx.fillRect(0, 0, this.camera.viewWidth, this.camera.viewHeight);
+    const gl = this.gl;
+    invert(this.camera.viewProjection, this.inverseViewProjection);
+    gl.useProgram(this.skyProgram.program);
+    gl.uniformMatrix4fv(
+      this.skyProgram.uniform('uInverseViewProjection'),
+      false,
+      this.inverseViewProjection,
+    );
+    gl.uniform3fv(this.skyProgram.uniform('uZenith'), ZENITH);
+    gl.uniform3fv(this.skyProgram.uniform('uHorizon'), HORIZON);
+    gl.uniform3f(this.skyProgram.uniform('uSunDirection'), SUN.x, SUN.y, SUN.z);
+    gl.uniform3fv(this.skyProgram.uniform('uSunColor'), SUN_COLOUR);
+    gl.depthMask(false);
+    gl.bindVertexArray(this.skyVao);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    gl.depthMask(true);
   }
 
   /**
-   * Draw everything standing on the ground, nearest last.
-   *
-   * Collected into one list with an explicit depth per sprite, then sorted,
-   * so that height, multi-tile footprints and sub-tile positions all take
-   * part in the ordering — none of which a walk over x + y diagonals can
-   * express. The list and its items are reused between frames.
+   * Fit the sun's view to the ground around the camera's target. The box
+   * follows the zoom, so a close view spends the whole map on one street
+   * rather than on country nobody can see.
    */
-  private drawObjects(
-    city: CityState,
-    view: ViewRect,
-    range: TileRange,
-    options: RenderOptions,
-  ): void {
-    const ctx = this.ctx;
-    const zoom = this.camera.zoom;
-    // Foliage and people are not worth drawing when zoomed far out.
-    const drawDetail = zoom >= DETAIL_ZOOM;
-    const width = city.width;
-    const elevation = city.map.elevation;
-    const items = this.drawItems;
-    items.length = 0;
+  private fitShadowMap(): void {
+    const radius = clamp(this.camera.distance * SHADOW_COVERAGE, MIN_SHADOW_RADIUS, MAX_SHADOW_RADIUS);
+    this.shadowRadius = radius;
+    const centre = {
+      x: this.camera.x,
+      y: this.camera.groundHeight,
+      z: this.camera.z,
+    };
+    const back = radius * 2.4;
+    lookAt(
+      this.lightView,
+      { x: centre.x + SUN.x * back, y: centre.y + SUN.y * back, z: centre.z + SUN.z * back },
+      centre,
+      { x: 0, y: 1, z: 0 },
+    );
+    ortho(this.lightProjection, -radius, radius, -radius, radius, 1, back * 2 + TERRAIN_HEIGHT * 2);
+    multiply(this.shadowMatrix, this.lightProjection, this.lightView);
+  }
 
-    for (let y = range.y0; y <= range.y1; y++) {
-      for (let x = range.x0; x <= range.x1; x++) {
-        const index = y * width + x;
-        const step = elevation[index];
-        const cx = (x - y) * HALF_WIDTH;
-        const cy = (x + y) * HALF_HEIGHT - step * ELEVATION_STEP;
+  /** Whether a chunk is close enough to the camera to be worth shadowing. */
+  private nearShadowCaster(chunk: Chunk): boolean {
+    const dx = (chunk.minX + chunk.maxX) / 2 - this.camera.x;
+    const dz = (chunk.minZ + chunk.maxZ) / 2 - this.camera.z;
+    return Math.hypot(dx, dz) < this.shadowRadius + CHUNK_TILES;
+  }
 
-        // Inline culling, with headroom for tall sprites above the tile.
-        if (cx + 90 < view.left || cx - 90 > view.right) continue;
-        if (cy + 90 < view.top || cy - 200 > view.bottom) continue;
+  // --- chunk maintenance ----------------------------------------------------
 
-        // The curtain wall.
-        const wallIndex = city.wallAt[index];
-        if (wallIndex >= 0) {
-          const segment = city.walls[wallIndex];
-          this.push(
-            depthOf(x, y, step),
-            cx,
-            cy,
-            getWallSprite(segment.kind, segment.connections, segment.orientation),
-            1,
-            null,
-          );
+  /** Mark the chunks the simulation has touched since the last frame. */
+  private consumeDirtyTiles(city: CityState): void {
+    if (city.dirtyTiles.size === 0) return;
+    let zonesTouched = false;
+    for (const index of city.dirtyTiles) {
+      const x = index % city.width;
+      const y = (index / city.width) | 0;
+      const cx = Math.floor(x / CHUNK_TILES);
+      const cz = Math.floor(y / CHUNK_TILES);
+      for (let dz = -1; dz <= 1; dz++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          const chunk = this.chunkAt(cx + dx, cz + dz);
+          if (chunk) chunk.contentDirty = true;
         }
+      }
+      zonesTouched = true;
+    }
+    city.dirtyTiles.clear();
+    if (zonesTouched) this.zoneRevision++;
+  }
 
-        // Buildings are emitted once, from their anchor tile, but sort on
-        // their far corner — see `buildingDepth`.
+  /**
+   * The chunks on screen, building what is missing within this frame's
+   * budget. Ground comes first: a chunk with no ground is a hole in the
+   * world, where a chunk with no trees yet is only a bare field.
+   */
+  private collectVisible(city: CityState): Chunk[] {
+    const visible: Chunk[] = [];
+    let budget = BUILD_BUDGET;
+    const order = this.chunks
+      .filter((chunk) =>
+        boxInFrustum(
+          this.planes,
+          chunk.minX,
+          chunk.minY,
+          chunk.minZ,
+          chunk.maxX,
+          chunk.maxY,
+          chunk.maxZ,
+        ),
+      )
+      .sort((a, b) => this.chunkDistance(a) - this.chunkDistance(b));
+
+    for (const chunk of order) {
+      const cost = chunk.coarse ? COARSE_COST : FINE_COST;
+      if (!chunk.builtGround) {
+        // Ground is never skipped in favour of something cheaper behind it:
+        // a chunk with no ground is a hole in the world.
+        if (budget <= 0) continue;
+        this.buildGround(city.map, chunk);
+        budget -= cost;
+      }
+      const detail = this.chunkDistance(chunk) < NEAR_WOOD;
+      if (chunk.inMap && (chunk.contentDirty || chunk.natureDetail !== detail)) {
+        if (budget > 0) {
+          this.buildContent(city, chunk, detail);
+          budget -= FINE_COST;
+        }
+      }
+      visible.push(chunk);
+    }
+    return visible;
+  }
+
+  private chunkDistance(chunk: Chunk): number {
+    const dx = (chunk.minX + chunk.maxX) / 2 - this.camera.x;
+    const dz = (chunk.minZ + chunk.maxZ) / 2 - this.camera.z;
+    return Math.hypot(dx, dz);
+  }
+
+  private buildGround(map: WorldMap, chunk: Chunk): void {
+    const gl = this.gl;
+    const mesh = this.scratch;
+    const subdivisions = chunk.coarse ? FAR_SUBDIVISIONS : NEAR_SUBDIVISIONS;
+    buildTerrainChunk(map, this.groundPalette!, chunk.cx, chunk.cz, mesh, subdivisions);
+    chunk.ground = chunk.ground ?? new Batch(gl);
+    chunk.ground.upload(mesh.vertexData(), mesh.indexData());
+    chunk.minY = mesh.minY - 1;
+    chunk.maxY = mesh.maxY + 14;
+
+    buildWaterChunk(map, chunk.cx, chunk.cz, mesh, chunk.coarse ? 2 : 0.5);
+    if (!mesh.isEmpty) {
+      chunk.water = chunk.water ?? new Batch(gl);
+      chunk.water.upload(mesh.vertexData(), mesh.indexData());
+      chunk.maxY = Math.max(chunk.maxY, WATER_HEIGHT + 1);
+    } else if (chunk.water) {
+      chunk.water.dispose();
+      chunk.water = null;
+    }
+    chunk.builtGround = true;
+  }
+
+  /** Rebuild the roads, buildings, walls and woodland of one chunk. */
+  private buildContent(city: CityState, chunk: Chunk, detail: boolean): void {
+    const gl = this.gl;
+    const map = city.map;
+    const mesh = this.scratch;
+    mesh.reset();
+
+    const x0 = Math.max(0, chunk.minX);
+    const z0 = Math.max(0, chunk.minZ);
+    const x1 = Math.min(city.width, chunk.maxX);
+    const z1 = Math.min(city.height, chunk.maxZ);
+
+    for (let y = z0; y < z1; y++) {
+      for (let x = x0; x < x1; x++) {
+        const index = tileIndex(city, x, y);
+        if (city.roads[index] !== RoadType.None) addRoad(mesh, city, x, y);
+        const wallIndex = city.wallAt[index];
+        if (wallIndex >= 0) addWall(mesh, map, city.walls[wallIndex]);
         const buildingId = city.buildingAt[index];
         if (buildingId >= 0) {
           const building = city.buildings.get(buildingId);
+          // A building is emitted once, from its anchor tile, even where its
+          // footprint runs into the next chunk.
           if (building && building.x === x && building.y === y) {
-            const sprite = getBuildingSprite(building.defId, building.variant, building.facing, building.abandoned);
-            this.push(buildingDepth(building, step), cx, cy, sprite, 1, building);
-          }
-        } else if (drawDetail && city.roads[index] === RoadType.None && wallIndex < 0) {
-          // Stones, flowers and tufts, and whatever grows over them. Each
-          // sorts from where it actually stands within the tile rather than
-          // from the tile's centre — see `scatterDepth`.
-          if (zoom >= FLORA_ZOOM) {
-            for (const prop of propsOnTile(city.map, x, y)) {
-              this.push(
-                scatterDepth(x, y, prop, step),
-                cx + prop.ox * HALF_WIDTH,
-                cy + prop.oy * HALF_HEIGHT,
-                getPropSprite(prop.variant),
-                prop.scale,
-                null,
-              );
-            }
-          }
-          // Woodland, but only where the city has not already cleared the
-          // ground to take it.
-          for (const tree of standingTreesOnTile(city, x, y)) {
-            this.push(
-              scatterDepth(x, y, tree, step),
-              cx + tree.ox * HALF_WIDTH,
-              cy + tree.oy * HALF_HEIGHT,
-              getTreeSprite(tree.variant),
-              tree.scale,
-              null,
-            );
+            addBuilding(mesh, map, placementOf(building));
           }
         }
       }
     }
+    chunk.structures = chunk.structures ?? new Batch(gl);
+    chunk.structures.upload(mesh.vertexData(), mesh.indexData());
 
-    // People and carts, at their own continuous position and their own
-    // height, so two villagers on one tile keep a stable order and neither
-    // pops a full step crossing a slope.
-    if (drawDetail) {
-      for (const agent of city.agents) {
-        if (agent.x < range.x0 || agent.x > range.x1 || agent.y < range.y0 || agent.y > range.y1) continue;
-        const height = sampleElevation(city, agent.x, agent.y);
-        const worldX = (agent.x - agent.y) * HALF_WIDTH;
-        const worldY = (agent.x + agent.y) * HALF_HEIGHT - height * ELEVATION_STEP;
-        if (worldX + 90 < view.left || worldX - 90 > view.right) continue;
-        if (worldY + 90 < view.top || worldY - 200 > view.bottom) continue;
-        const direction = directionOf(agent.heading);
-        const frame = Math.floor(options.time * 5 + agent.id) % 2;
-        const sprite = getAgentSprite(agent.kind, agent.variant, direction, frame);
-        this.push(depthOf(agent.x, agent.y, height), worldX, worldY, sprite, 1, null);
-      }
-    }
-
-    items.sort(byDepth);
-
-    for (let i = 0; i < items.length; i++) {
-      const item = items[i];
-      const sprite = item.sprite;
-      if (item.scale === 1) {
-        ctx.drawImage(sprite.canvas, item.x - sprite.originX, item.y - sprite.originY);
-      } else {
-        ctx.save();
-        ctx.translate(item.x, item.y);
-        ctx.scale(item.scale, item.scale);
-        ctx.drawImage(sprite.canvas, -sprite.originX, -sprite.originY);
-        ctx.restore();
-      }
-
-      const building = item.building;
-      if (building) {
-        if (options.selectedBuilding === building.id) {
-          this.outlineBuilding(city, building.x, building.y, building.width, building.height);
-        }
-        if (!building.connected && !building.abandoned && drawDetail) {
-          this.drawWarningIcon(item.x, item.y - sprite.originY * 0.55, options.time);
-        }
-      }
-    }
-  }
-
-  /**
-   * Add a sprite to this frame's draw list, reusing the item object from the
-   * previous frame so a busy frame allocates nothing per sprite.
-   */
-  private push(
-    depth: number,
-    x: number,
-    y: number,
-    sprite: Sprite,
-    scale: number,
-    building: Building | null,
-  ): void {
-    const items = this.drawItems;
-    const pool = this.itemPool;
-    const index = items.length;
-    let item = pool[index];
-    if (!item) {
-      item = { depth, x, y, sprite, scale, building };
-      pool[index] = item;
-    } else {
-      item.depth = depth;
-      item.x = x;
-      item.y = y;
-      item.sprite = sprite;
-      item.scale = scale;
-      item.building = building;
-    }
-    items.push(item);
-  }
-
-  private outlineBuilding(city: CityState, x: number, y: number, width: number, height: number): void {
-    strokeTileRect(this.ctx, city, x, y, width, height, PALETTE.gold, 2.5);
-  }
-
-  /** A pulsing marker over a building that has lost its road. */
-  private drawWarningIcon(x: number, y: number, time: number): void {
-    const ctx = this.ctx;
-    const bob = Math.sin(time * 3) * 3;
-    ctx.save();
-    ctx.translate(x, y + bob);
-    ctx.beginPath();
-    ctx.moveTo(0, -11);
-    ctx.lineTo(9, 5);
-    ctx.lineTo(-9, 5);
-    ctx.closePath();
-    ctx.fillStyle = PALETTE.gold;
-    ctx.fill();
-    ctx.strokeStyle = 'rgba(40, 28, 10, 0.7)';
-    ctx.lineWidth = 1.4;
-    ctx.stroke();
-    ctx.fillStyle = '#3A2A10';
-    ctx.fillRect(-1.2, -6, 2.4, 6);
-    ctx.fillRect(-1.2, 1.5, 2.4, 2.4);
-    ctx.restore();
-  }
-
-  // --- Overlays -------------------------------------------------------------
-
-  private drawOverlay(city: CityState, range: TileRange, overlay: Overlay): void {
-    if (overlay === 'land') return;
-    const field = overlayField(city, overlay);
-    if (!field) return;
-    const ctx = this.ctx;
-    const { low, high } = OVERLAY_COLORS[overlay];
-
-    // Bucket into a handful of shades so this stays one fill per shade.
-    const buckets = new Map<number, Path2D>();
-    for (let y = range.y0; y <= range.y1; y++) {
-      for (let x = range.x0; x <= range.x1; x++) {
+    // Woodland and ground clutter, on whatever the town has not taken.
+    mesh.reset();
+    for (let y = z0; y < z1; y++) {
+      for (let x = x0; x < x1; x++) {
         const index = tileIndex(city, x, y);
-        if (isWater(city.map.terrain[index] as Terrain)) continue;
-        const value = Math.max(0, Math.min(1, field[index]));
-        if (value <= 0.02) continue;
-        const bucket = Math.min(5, Math.floor(value * 6));
-        let path = buckets.get(bucket);
-        if (!path) {
-          path = new Path2D();
-          buckets.set(bucket, path);
+        if (city.buildingAt[index] >= 0 || city.roads[index] !== RoadType.None) continue;
+        if (city.wallAt[index] >= 0) continue;
+        for (const tree of standingTreesOnTile(city, x, y)) {
+          const wx = x + 0.5 + tree.ox;
+          const wz = y + 0.5 + tree.oy;
+          const yaw = hash2(x * 31 + tree.variant, y * 17, map.seed) * Math.PI * 2;
+          mesh.appendTransformed(
+            treeTemplate(tree.variant, detail),
+            wx,
+            surfaceHeight(map, wx, wz) - 0.05,
+            wz,
+            yaw,
+            tree.scale,
+            (hash2(x, y + tree.variant, map.seed ^ 0x77) - 0.5) * 0.14,
+          );
         }
-        const cx = (x - y) * HALF_WIDTH;
-        const cy = (x + y) * HALF_HEIGHT - city.map.elevation[index] * ELEVATION_STEP;
-        path.moveTo(cx, cy - HALF_HEIGHT);
-        path.lineTo(cx + HALF_WIDTH, cy);
-        path.lineTo(cx, cy + HALF_HEIGHT);
-        path.lineTo(cx - HALF_WIDTH, cy);
-        path.closePath();
-      }
-    }
-    for (const [bucket, path] of buckets) {
-      const t = bucket / 5;
-      ctx.fillStyle = withAlpha(mix(low, high, t), 0.28 + t * 0.34);
-      ctx.fill(path);
-    }
-  }
-
-  /** Parcel boundaries, and the lot the player is being quoted for. */
-  private drawParcelGrid(city: CityState, range: TileRange, options: RenderOptions): void {
-    if (options.overlay !== 'land' && !options.highlightParcel) return;
-    const ctx = this.ctx;
-
-    if (options.overlay === 'land') {
-      const px0 = Math.floor(range.x0 / PARCEL_SIZE);
-      const py0 = Math.floor(range.y0 / PARCEL_SIZE);
-      const px1 = Math.floor(range.x1 / PARCEL_SIZE);
-      const py1 = Math.floor(range.y1 / PARCEL_SIZE);
-      for (let py = py0; py <= py1; py++) {
-        for (let px = px0; px <= px1; px++) {
-          const parcel = city.parcels[py * city.parcelsWide + px];
-          if (!parcel || parcel.owned) continue;
-          const color = parcel.settleable ? PALETTE.gold : PALETTE.crimson;
-          strokeTileRect(
-            ctx,
-            city,
-            px * PARCEL_SIZE,
-            py * PARCEL_SIZE,
-            PARCEL_SIZE,
-            PARCEL_SIZE,
-            withAlpha(color, 0.65),
-            2,
-            withAlpha(color, parcel.settleable ? 0.1 : 0.05),
+        if (!detail) continue;
+        if (city.zones[index] !== Zone.None) continue;
+        for (const prop of propsOnTile(map, x, y)) {
+          const wx = x + 0.5 + prop.ox;
+          const wz = y + 0.5 + prop.oy;
+          mesh.appendTransformed(
+            propTemplate(prop.variant),
+            wx,
+            surfaceHeight(map, wx, wz) - 0.02,
+            wz,
+            hash2(x + prop.variant, y, map.seed ^ 0x2b) * Math.PI * 2,
+            prop.scale,
           );
         }
       }
     }
+    chunk.nature = chunk.nature ?? new Batch(gl);
+    chunk.nature.upload(mesh.vertexData(), mesh.indexData());
 
-    if (options.highlightParcel) {
-      const { px, py } = options.highlightParcel;
-      strokeTileRect(
-        ctx,
-        city,
-        px * PARCEL_SIZE,
-        py * PARCEL_SIZE,
-        PARCEL_SIZE,
-        PARCEL_SIZE,
-        PALETTE.gold,
-        3,
-        withAlpha(PALETTE.gold, 0.22),
+    chunk.natureDetail = detail;
+    chunk.contentDirty = false;
+    chunk.maxY = Math.max(chunk.maxY, chunk.minY + 6 + treeHeight(0) * 2);
+  }
+
+  // --- people ---------------------------------------------------------------
+
+  private buildAgents(city: CityState, time: number): void {
+    const mesh = this.agentMesh;
+    mesh.reset();
+    // Anyone far enough away to be a speck is not worth the triangles.
+    const range = Math.min(72, this.camera.distance * 1.9 + 22);
+    for (const agent of city.agents) {
+      const wx = agent.x + 0.5;
+      const wz = agent.y + 0.5;
+      if (Math.hypot(wx - this.camera.x, wz - this.camera.z) > range) continue;
+      addAgent(mesh, {
+        kind: agent.kind,
+        variant: agent.variant,
+        x: wx,
+        y: surfaceHeight(city.map, wx, wz),
+        z: wz,
+        // Tile space runs +x east and +y south, and so does the world.
+        heading: Math.atan2(Math.sin(agent.heading), Math.cos(agent.heading)),
+        phase: time * (agent.kind === AgentKind.Cart ? 4 : 7) + agent.id,
+        laden: agent.cargo !== null,
+      });
+    }
+    if (mesh.isEmpty) {
+      this.agentBatch?.upload(new Float32Array(0), new Uint32Array(0));
+      return;
+    }
+    this.agentBatch = this.agentBatch ?? new Batch(this.gl, true);
+    this.agentBatch.upload(mesh.vertexData(), mesh.indexData());
+  }
+
+  // --- decals ---------------------------------------------------------------
+
+  private updateDecals(city: CityState, options: RenderOptions): void {
+    const gl = this.gl;
+    const decals = this.decals;
+    if (!decals) return;
+
+    let selected: Building | null = null;
+    if (options.selectedBuilding !== null) {
+      selected = city.buildings.get(options.selectedBuilding) ?? null;
+    }
+    const state: DecalState = {
+      overlay: options.overlay,
+      showZones: options.showZones,
+      hoverTile: options.hoverTile,
+      preview: options.preview,
+      selectedFootprint: selected
+        ? { x: selected.x, y: selected.y, width: selected.width, height: selected.height }
+        : null,
+      highlightParcel: options.highlightParcel,
+    };
+    decals.update(city, state, this.zoneRevision);
+
+    if (!this.decalTexture) {
+      const texture = gl.createTexture();
+      if (!texture) throw new Error('Could not allocate the overlay map');
+      gl.bindTexture(gl.TEXTURE_2D, texture);
+      gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, decals.width, decals.height);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      this.decalTexture = texture;
+      this.decalRevision = -1;
+    }
+    if (this.decalRevision !== decals.revision) {
+      gl.bindTexture(gl.TEXTURE_2D, this.decalTexture);
+      gl.texSubImage2D(
+        gl.TEXTURE_2D,
+        0,
+        0,
+        0,
+        decals.width,
+        decals.height,
+        gl.RGBA,
+        gl.UNSIGNED_BYTE,
+        decals.pixels,
       );
+      this.decalRevision = decals.revision;
     }
   }
 
-  private drawPreview(city: CityState, options: RenderOptions): void {
-    const ctx = this.ctx;
-    if (options.preview) {
-      for (const tile of options.preview.tiles) {
-        strokeTile(
-          ctx,
-          city,
-          tile.x,
-          tile.y,
-          withAlpha(tile.ok ? PALETTE.emerald : PALETTE.crimson, 0.95),
-          2,
-          withAlpha(tile.ok ? PALETTE.emerald : PALETTE.crimson, 0.3),
-        );
-      }
-      if (options.preview.rect) {
-        const rect = options.preview.rect;
-        strokeTileRect(
-          ctx,
-          city,
-          rect.x,
-          rect.y,
-          rect.width,
-          rect.height,
-          rect.ok ? PALETTE.emerald : PALETTE.crimson,
-          3,
-        );
-      }
-    } else if (options.hoverTile) {
-      strokeTile(ctx, city, options.hoverTile.x, options.hoverTile.y, withAlpha(PALETTE.parchment, 0.8), 2);
+  // --- picking --------------------------------------------------------------
+
+  /**
+   * Which tile a screen point is over, by following the ray to the ground.
+   * Where the ray misses the ground entirely — the player is pointing at the
+   * sky — the waterline is used, so a click near the horizon still lands
+   * somewhere sensible rather than nowhere.
+   */
+  pickTile(city: CityState, screenX: number, screenY: number): { x: number; y: number } | null {
+    const ray = this.camera.screenRay(screenX, screenY);
+    let hit = marchToGround(city.map, ray, this.camera.distance * 6 + 400);
+    if (!hit && ray.direction.y < -1e-4) {
+      const t = (WATER_HEIGHT - ray.origin.y) / ray.direction.y;
+      hit = {
+        x: ray.origin.x + ray.direction.x * t,
+        y: WATER_HEIGHT,
+        z: ray.origin.z + ray.direction.z * t,
+      };
     }
+    if (!hit) return null;
+    const x = Math.floor(hit.x);
+    const y = Math.floor(hit.z);
+    if (x < 0 || y < 0 || x >= city.width || y >= city.height) return null;
+    return { x, y };
+  }
+
+  /** Where a tile currently sits on screen, in CSS pixels. */
+  screenForTile(city: CityState, tileX: number, tileY: number): { x: number; y: number } {
+    const wx = tileX + 0.5;
+    const wz = tileY + 0.5;
+    return this.camera.worldToScreen(wx, surfaceHeight(city.map, wx, wz), wz);
   }
 
   /**
-   * Which tile a screen point is over. Because height shifts a tile upward
-   * on screen, the search walks from the highest possible ground down, and
-   * takes the first tile whose diamond actually contains the point.
+   * What the renderer is holding and drawing, for the console handle and the
+   * frame-pacing tool.
    */
-  pickTile(city: CityState, screenX: number, screenY: number): { x: number; y: number } | null {
-    const world = this.camera.screenToWorld(screenX, screenY);
-    let best: { x: number; y: number } | null = null;
+  stats(): { chunks: number; built: number; drawn: number; frameMs: number } {
+    let built = 0;
+    for (const chunk of this.chunks) if (chunk.builtGround) built++;
+    return {
+      chunks: this.chunks.length,
+      built,
+      drawn: this.drawnChunks,
+      frameMs: Math.round(this.frameTime * 100) / 100,
+    };
+  }
 
-    // Tiles higher up the screen may be tall ground in front of the camera;
-    // check from the far side forward and keep the nearest match.
-    for (let elevation = 0; elevation <= 7; elevation++) {
-      const adjustedY = world.y + elevation * ELEVATION_STEP;
-      const tx = Math.floor(adjustedY / (HALF_HEIGHT * 2) + world.x / (HALF_WIDTH * 2) + 0.5);
-      const ty = Math.floor(adjustedY / (HALF_HEIGHT * 2) - world.x / (HALF_WIDTH * 2) + 0.5);
-      if (tx < 0 || ty < 0 || tx >= city.width || ty >= city.height) continue;
-      if (city.map.elevation[tileIndex(city, tx, ty)] !== elevation) continue;
-      best = { x: tx, y: ty };
-    }
-
-    if (best) return best;
-    // Fall back to the flat projection, so clicks never simply do nothing.
-    const tx = Math.floor(world.y / (HALF_HEIGHT * 2) + world.x / (HALF_WIDTH * 2) + 0.5);
-    const ty = Math.floor(world.y / (HALF_HEIGHT * 2) - world.x / (HALF_WIDTH * 2) + 0.5);
-    if (tx < 0 || ty < 0 || tx >= city.width || ty >= city.height) return null;
-    return { x: tx, y: ty };
+  /** Point the camera at a building, for the "show me" links in the ledger. */
+  focusOn(building: Building): void {
+    const centre = buildingCenter(building);
+    this.camera.centreOnTile(centre.x, centre.y);
   }
 }
 
-const OVERLAY_COLORS: Record<Overlay, { low: string; high: string }> = {
-  none: { low: PALETTE.grass, high: PALETTE.grass },
-  land: { low: PALETTE.gold, high: PALETTE.gold },
-  water: { low: PALETTE.waterShallow, high: PALETTE.water },
-  sewage: { low: '#8C9E5C', high: '#5C6B2C' },
-  safety: { low: '#7FB3D9', high: PALETTE.alliance },
-  faith: { low: '#F3E7CC', high: PALETTE.gold },
-  leisure: { low: '#A5D267', high: PALETTE.emerald },
-  commerce: { low: '#F0C44A', high: '#C4762C' },
-  landValue: { low: '#C8E0A0', high: '#2F7A4A' },
-  pollution: { low: '#C4A88C', high: '#6E3A2C' },
-};
+/** A general 4x4 inverse, needed only for turning the sky back into rays. */
+function invert(m: Mat4, out: Mat4): Mat4 {
+  const a = m;
+  const b00 = a[0] * a[5] - a[1] * a[4];
+  const b01 = a[0] * a[6] - a[2] * a[4];
+  const b02 = a[0] * a[7] - a[3] * a[4];
+  const b03 = a[1] * a[6] - a[2] * a[5];
+  const b04 = a[1] * a[7] - a[3] * a[5];
+  const b05 = a[2] * a[7] - a[3] * a[6];
+  const b06 = a[8] * a[13] - a[9] * a[12];
+  const b07 = a[8] * a[14] - a[10] * a[12];
+  const b08 = a[8] * a[15] - a[11] * a[12];
+  const b09 = a[9] * a[14] - a[10] * a[13];
+  const b10 = a[9] * a[15] - a[11] * a[13];
+  const b11 = a[10] * a[15] - a[11] * a[14];
 
-function overlayField(city: CityState, overlay: Overlay): Float32Array | null {
-  switch (overlay) {
-    case 'water':
-      return city.coverage[Service.Water];
-    case 'sewage':
-      return city.coverage[Service.Sewage];
-    case 'safety':
-      return city.coverage[Service.Safety];
-    case 'faith':
-      return city.coverage[Service.Faith];
-    case 'leisure':
-      return city.coverage[Service.Leisure];
-    case 'commerce':
-      return city.coverage[Service.Commerce];
-    case 'landValue':
-      return city.landValue;
-    case 'pollution':
-      return city.pollution;
-    default:
-      return null;
-  }
+  let determinant = b00 * b11 - b01 * b10 + b02 * b09 + b03 * b08 - b04 * b07 + b05 * b06;
+  if (!determinant) return out;
+  determinant = 1 / determinant;
+
+  out[0] = (a[5] * b11 - a[6] * b10 + a[7] * b09) * determinant;
+  out[1] = (a[2] * b10 - a[1] * b11 - a[3] * b09) * determinant;
+  out[2] = (a[13] * b05 - a[14] * b04 + a[15] * b03) * determinant;
+  out[3] = (a[10] * b04 - a[9] * b05 - a[11] * b03) * determinant;
+  out[4] = (a[6] * b08 - a[4] * b11 - a[7] * b07) * determinant;
+  out[5] = (a[0] * b11 - a[2] * b08 + a[3] * b07) * determinant;
+  out[6] = (a[14] * b02 - a[12] * b05 - a[15] * b01) * determinant;
+  out[7] = (a[8] * b05 - a[10] * b02 + a[11] * b01) * determinant;
+  out[8] = (a[4] * b10 - a[5] * b08 + a[7] * b06) * determinant;
+  out[9] = (a[1] * b08 - a[0] * b10 - a[3] * b06) * determinant;
+  out[10] = (a[12] * b04 - a[13] * b02 + a[15] * b00) * determinant;
+  out[11] = (a[9] * b02 - a[8] * b04 - a[11] * b00) * determinant;
+  out[12] = (a[5] * b07 - a[4] * b09 - a[6] * b06) * determinant;
+  out[13] = (a[0] * b09 - a[1] * b07 + a[2] * b06) * determinant;
+  out[14] = (a[13] * b01 - a[12] * b03 - a[14] * b00) * determinant;
+  out[15] = (a[8] * b03 - a[9] * b01 + a[10] * b00) * determinant;
+  return out;
 }
 
-/** Map a tile-space heading onto one of the four drawn facings. */
-export function directionOf(heading: number): number {
-  const dx = Math.cos(heading);
-  const dy = Math.sin(heading);
-  if (Math.abs(dx) > Math.abs(dy)) return dx > 0 ? 1 : 3;
-  return dy > 0 ? 2 : 0;
-}
-
-export { getDef, Zone, AgentKind };
+export { getDef, Zone, AgentKind, PALETTE, colour, Camera };

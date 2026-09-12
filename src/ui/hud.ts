@@ -697,6 +697,10 @@ export class Hud {
         'Buy the next lot',
         'When the district fills, pick \u201cLand\u201d and tap a lot beyond the walls. You pay for the ground and for the new stonework, and the curtain wall moves out to enclose it.',
       ],
+      [
+        'Walk round it',
+        'The valley is a real place, so look at it from anywhere: drag with the right button — or twist with two fingers — to turn and tilt, scroll or pinch to come closer. Coming in drops the view toward the street; pulling back lifts it over the district. Q and E turn a step at a time.',
+      ],
     ];
 
     append(body, [
@@ -716,7 +720,7 @@ export class Hud {
     append(body, [
       el('div', {
         class: 'blurb',
-        text: 'A city builder set in Elwynn Forest. Grow a settlement from the king’s road into a walled city in the manner of Stormwind.',
+        text: 'A city builder set in Elwynn Forest, built in the vernacular of England around 1300: cruck cottages and jettied burgage houses, thatch and stone slate, a curtain wall and a gatehouse, in rolling country with no cliff in it anywhere.',
       }),
       button('action secondary', () => this.togglePanel('guide', true), 'How to found a settlement'),
       el('div', { class: 'section-title', text: 'Your City' }),

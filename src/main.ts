@@ -6,14 +6,21 @@
  */
 import './ui/styles.css';
 
-import { CityState, PARCEL_SIZE, buildingAtTile, buildingCenter, createCity, parcelForTile, tileIndex } from './sim/city';
+import {
+  CityState,
+  PARCEL_SIZE,
+  buildingAtTile,
+  buildingCenter,
+  createCity,
+  parcelForTile,
+  tileIndex,
+} from './sim/city';
 import { Simulation } from './sim/simulation';
 import { createTrafficQueue } from './sim/agents';
 import { buyParcel } from './sim/build';
 import { RoadType, Zone } from './sim/types';
 import { SAVE_KEY, hasSave, loadFromStorage, saveToStorage } from './sim/save';
 import { Renderer, Overlay, BuildPreview } from './render/renderer';
-import { tileToWorld } from './render/iso';
 import { Hud } from './ui/hud';
 import { InputController } from './ui/input';
 import { ToolState, applyTool, defaultTool, quoteTool, tilesForDrag, toolDraws, toolHint } from './ui/tools';
@@ -53,7 +60,7 @@ class Game {
     root.appendChild(this.canvas);
 
     this.renderer = new Renderer(this.canvas);
-    this.renderer.camera.setWorldBounds(city.width, city.height);
+    this.renderer.camera.setWorldBounds(city.width, city.height, city.map);
     this.frameDistrict(city);
 
     this.hud = new Hud(root, this.tool, {
@@ -72,11 +79,7 @@ class Game {
       },
       onFocusBuilding: (building) => {
         const centre = buildingCenter(building);
-        this.renderer.camera.centreOnTile(
-          centre.x,
-          centre.y,
-          this.city.map.elevation[tileIndex(this.city, building.x, building.y)],
-        );
+        this.renderer.camera.centreOnTile(centre.x, centre.y);
       },
     });
     this.hud.attachCity(city);
@@ -112,17 +115,17 @@ class Game {
     requestAnimationFrame(this.frame);
   }
 
-  /** Open on the founding district as a whole, at a workable zoom. */
+  /** Open looking across the founding district, from the south-east. */
   private frameDistrict(city: CityState): void {
     const span = PARCEL_SIZE * city.map.districtParcels;
     const centreX = city.map.foundingDistrict.x * PARCEL_SIZE + span / 2;
     const centreY = city.map.foundingDistrict.y * PARCEL_SIZE + span / 2;
-    this.renderer.camera.zoom = 0.85;
-    this.renderer.camera.centreOnTile(
-      centreX,
-      centreY,
-      city.map.elevation[tileIndex(city, Math.round(centreX), Math.round(centreY))] ?? 0,
-    );
+    const camera = this.renderer.camera;
+    camera.distance = span * 2.1;
+    camera.pitch = 0.62;
+    camera.yaw = Math.PI * 0.22;
+    camera.centreOnTile(centreX, centreY);
+    camera.update();
   }
 
   /** Live city state, for the console handle and automated tests. */
@@ -136,9 +139,8 @@ class Game {
 
   /** Where a tile currently sits on screen, in CSS pixels. */
   screenForTile(tileX: number, tileY: number): { x: number; y: number } {
-    const elevation = this.city.map.elevation[tileIndex(this.city, tileX, tileY)] ?? 0;
-    const world = tileToWorld(tileX, tileY, elevation);
-    return this.renderer.camera.worldToScreen(world.x, world.y);
+    const point = this.renderer.screenForTile(this.city, tileX, tileY);
+    return { x: point.x, y: point.y };
   }
 
   // --- frame loop -----------------------------------------------------------
@@ -173,8 +175,8 @@ class Game {
   private handleResize = (): void => {
     const width = window.innerWidth;
     const height = window.innerHeight;
-    // Cap the backing store on very dense displays; the art is hand-drawn
-    // vector work and does not need more than two device pixels per CSS one.
+    // Cap the backing store on very dense displays: the scene is shaded per
+    // pixel, and beyond two device pixels per CSS one nobody can tell.
     const ratio = Math.min(window.devicePixelRatio || 1, 2);
     this.renderer.resize(width, height, ratio);
   };
@@ -304,6 +306,12 @@ class Game {
         this.hud.setTool(this.tool);
         this.hud.showHint(toolHint(this.tool));
         break;
+      case 'q':
+        this.renderer.camera.orbitByScreen(-110, 0);
+        break;
+      case 'e':
+        this.renderer.camera.orbitByScreen(110, 0);
+        break;
       default:
         break;
     }
@@ -367,7 +375,7 @@ class Game {
     this.highlightParcel = null;
     this.preview = null;
     this.lastAutosaveDay = city.clock.totalDays;
-    this.renderer.camera.setWorldBounds(city.width, city.height);
+    this.renderer.camera.setWorldBounds(city.width, city.height, city.map);
     this.frameDistrict(city);
   }
 }
@@ -386,6 +394,8 @@ function installDebugHandle(game: Game): void {
       return game.view.camera;
     },
     screenForTile: (x: number, y: number) => game.screenForTile(x, y),
+    /** What the renderer is holding and drawing, for frame-pacing checks. */
+    renderStats: () => game.view.stats(),
     version: '1.0.0',
   };
   (window as unknown as Record<string, unknown>).azerothSkylines = handle;

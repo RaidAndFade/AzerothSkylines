@@ -247,7 +247,7 @@ export interface Agent {
   path: number[];
   step: number;
   speed: number;
-  /** Facing angle in radians, for sprite orientation. */
+  /** Facing angle in radians, for which way the figure is turned. */
   heading: number;
   variant: number;
   /** Building the agent is travelling to, if any. */

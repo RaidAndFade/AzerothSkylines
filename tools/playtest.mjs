@@ -98,7 +98,7 @@ const { x0, y0, x1, y1 } = state.owned;
 await page.evaluate(([cx, cy]) => {
   const cam = window.azerothSkylines.camera;
   cam.zoom = 0.62;
-  cam.centreOnTile(cx, cy, 0);
+  cam.centreOnTile(cx, cy);
 }, [(x0 + x1) / 2, (y0 + y1) / 2]);
 await page.waitForTimeout(400);
 await page.screenshot({ path: `${OUT}/20-empty.png` });
@@ -155,7 +155,7 @@ await page.screenshot({ path: `${OUT}/23-town.png` });
 await page.evaluate(([cx, cy]) => {
   const cam = window.azerothSkylines.camera;
   cam.zoom = 1.5;
-  cam.centreOnTile(cx, cy, 0);
+  cam.centreOnTile(cx, cy);
 }, [x0 + 6, y0 + 6]);
 await page.waitForTimeout(1500);
 await page.screenshot({ path: `${OUT}/24-street.png` });

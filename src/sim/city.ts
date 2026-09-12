@@ -242,7 +242,7 @@ export function markDirty(city: CityState, x: number, y: number): void {
 }
 
 export function markRectDirty(city: CityState, x: number, y: number, w: number, h: number): void {
-  // Include a one-tile skirt: tall sprites overlap into neighbouring chunks.
+  // Include a one-tile skirt: a roof or a tree overhangs into its neighbours.
   for (let ty = y - 1; ty <= y + h; ty++) {
     for (let tx = x - 1; tx <= x + w; tx++) markDirty(city, tx, ty);
   }

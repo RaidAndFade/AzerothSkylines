@@ -1,4 +1,11 @@
-/** Grows a town and captures the README screenshot. */
+/**
+ * Grows a town and captures the README screenshot.
+ *
+ * `GROW_MS` sets how long the clock is left running at full speed — the
+ * default is enough on a machine with a GPU; raise it where the browser is
+ * falling back to software rendering and the simulation is being throttled
+ * along with the frame rate.
+ */
 import { chromium } from 'playwright';
 import path from 'node:path';
 import { launchOptions } from './browser.mjs';
@@ -40,7 +47,10 @@ async function pick(name) {
 }
 
 const { x0, y0 } = owned;
-await page.evaluate(([a, b]) => { const c = window.azerothSkylines.camera; c.zoom = 0.9; c.centreOnTile(a, b, 0); }, [x0 + 8, y0 + 8]);
+await page.evaluate(([a, b]) => {
+  const c = window.azerothSkylines.camera;
+  c.distance = 34; c.pitch = 1.3; c.yaw = 0; c.centreOnTile(a, b); c.update();
+}, [x0 + 8, y0 + 8]);
 await page.waitForTimeout(300);
 
 await tool('Roads').click(); await page.waitForTimeout(150); await close();
@@ -68,11 +78,16 @@ await drag([x0 + 1, y0 + 13], [x0 + 14, y0 + 13]);
 await tool('Inspect').click(); await page.waitForTimeout(120);
 
 await page.locator('#speed button').nth(3).click();
-await page.waitForTimeout(35000);
+await page.waitForTimeout(Number(process.env.GROW_MS ?? 35000));
 await page.locator('#speed button').nth(1).click();
 
-await page.evaluate(([a, b]) => { const c = window.azerothSkylines.camera; c.zoom = 1.15; c.centreOnTile(a, b, 0); }, [x0 + 8, y0 + 8]);
-await page.waitForTimeout(1200);
+// Down off the vertical and round to the south-west, so the shot shows the
+// relief and the shadows rather than a plan of the streets.
+await page.evaluate(([a, b]) => {
+  const c = window.azerothSkylines.camera;
+  c.distance = 30; c.pitch = 0.48; c.yaw = 0.62; c.centreOnTile(a, b); c.update();
+}, [x0 + 8, y0 + 8]);
+await page.waitForTimeout(Number(process.env.SETTLE_MS ?? 1200));
 await page.screenshot({ path: 'docs/screenshot-valley.png' });
 const stats = await page.evaluate(() => {
   const c = window.azerothSkylines.city;

@@ -11,8 +11,37 @@ import { Terrain, isBuildable, isWater } from './types';
 
 export const MAX_ELEVATION = 7;
 /** Normalised height below which terrain is water. */
-const SEA_LEVEL = 0.36;
+export const SEA_LEVEL = 0.36;
 const SHALLOW_BAND = 0.045;
+
+/**
+ * World units across one tile. The renderer works in these units, so a
+ * building a tile wide is exactly one unit wide and heights below are
+ * directly comparable with footprints.
+ */
+export const TILE_SIZE = 1;
+
+/**
+ * World height spanned by the full normalised height range. Chosen against
+ * `MAX_GROUND_SLOPE` so the valley floor can climb to the foothills over a
+ * few dozen tiles rather than in one lurch.
+ */
+export const TERRAIN_HEIGHT = 22;
+
+/** The surface of the water, in world units. */
+export const WATER_HEIGHT = SEA_LEVEL * TERRAIN_HEIGHT;
+
+/**
+ * The steepest rise the ground is ever allowed, in world units per tile —
+ * about twenty-three degrees, the pitch of a steep pasture. Generation ends
+ * with a pass that enforces it everywhere, which is what keeps the valley
+ * free of cliffs, steps and sudden shapes: every hillside is walkable and
+ * every shore wades in.
+ */
+export const MAX_GROUND_SLOPE = 0.42;
+
+/** The steepest grade the king's road is cut to, in world units per tile. */
+const ROAD_GRADE = 0.16;
 
 export interface TerrainOptions {
   width: number;
@@ -153,10 +182,17 @@ export function generateWorld(options: TerrainOptions): WorldMap {
   const lake = carveLake(heightField, width, height, rng);
   const streams = carveStreams(heightField, width, height, rng, lake);
 
-  // --- 3. Smooth the valley floor so the city has flat ground to build on ---
+  // --- 3. Weather the relief until every slope is one you could walk up ----
   smoothLowlands(heightField, width, height);
+  // Blur, then cap the gradient, then blur again: capping alone leaves the
+  // shaved-off summits faceted, and blurring alone leaves the steep ground
+  // steep. Together they settle into rounded downland.
+  blurRelief(heightField, width, height, 2, 0.55);
+  limitSlopes(heightField, width, height);
+  blurRelief(heightField, width, height, 1, 0.4);
+  limitSlopes(heightField, width, height);
 
-  // --- 4. Quantise to elevation steps and split land from water ------------
+  // --- 4. Split land from water and read off the elevation steps -----------
   const submerged = new Uint8Array(cells);
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
@@ -168,15 +204,11 @@ export function generateWorld(options: TerrainOptions): WorldMap {
         terrain[i] = h < SEA_LEVEL - SHALLOW_BAND ? Terrain.DeepWater : Terrain.ShallowWater;
         continue;
       }
-      const above = inverseLerp(SEA_LEVEL, 1, h);
-      // A gentle curve keeps most of the valley within one or two steps while
-      // still letting the foothills climb.
-      elevation[i] = clamp(Math.round(above ** 1.45 * MAX_ELEVATION), 0, MAX_ELEVATION);
+      elevation[i] = elevationForHeight(h);
       // Provisional: refined once moisture and woodland are known.
       terrain[i] = Terrain.Grass;
     }
   }
-  flattenElevationNoise(elevation, submerged, width, height);
 
   // --- 5. Moisture, woodland, fertility and ore ----------------------------
   const waterDistance = distanceToWater(terrain, width, height);
@@ -256,6 +288,10 @@ export function generateWorld(options: TerrainOptions): WorldMap {
   const entry = chooseRoadEntry(map, site);
   const road = traceKingsRoad(map, entry, site);
   levelRoadCorridor(map, road);
+  // Cutting and filling for the road can leave a bank at the edge of the
+  // corridor; settle it back into the hillside and re-read the steps.
+  limitSlopes(heightField, width, height);
+  refreshElevation(map);
 
   return {
     ...map,
@@ -377,35 +413,175 @@ function smoothLowlands(heights: Float32Array, width: number, height: number): v
   }
 }
 
-/** Remove single-tile elevation spikes so the isometric terrain reads cleanly. */
-function flattenElevationNoise(
-  elevation: Int8Array,
-  submerged: Uint8Array,
+/** A separable box blur over the whole relief, run `passes` times. */
+function blurRelief(
+  heights: Float32Array,
   width: number,
   height: number,
+  passes: number,
+  strength: number,
 ): void {
-  const copy = Int8Array.from(elevation);
-  for (let y = 1; y < height - 1; y++) {
-    for (let x = 1; x < width - 1; x++) {
-      const i = y * width + x;
-      // Water is always at step zero; never average it back up onto dry land.
-      if (submerged[i]) continue;
-      const here = copy[i];
-      const neighbours = [
-        copy[i - width],
-        copy[i + width],
-        copy[i - 1],
-        copy[i + 1],
-      ];
-      let differing = 0;
-      let total = 0;
-      for (const n of neighbours) {
-        if (n !== here) differing++;
-        total += n;
+  const scratch = new Float32Array(heights.length);
+  for (let pass = 0; pass < passes; pass++) {
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const i = y * width + x;
+        const left = heights[i - (x > 0 ? 1 : 0)];
+        const right = heights[i + (x < width - 1 ? 1 : 0)];
+        scratch[i] = lerp(heights[i], (left + heights[i] * 2 + right) * 0.25, strength);
       }
-      if (differing === 4) elevation[i] = Math.round(total / 4);
+    }
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const i = y * width + x;
+        const up = scratch[i - (y > 0 ? width : 0)];
+        const down = scratch[i + (y < height - 1 ? width : 0)];
+        heights[i] = lerp(scratch[i], (up + scratch[i] * 2 + down) * 0.25, strength);
+      }
     }
   }
+}
+
+/**
+ * Cap the gradient of the relief at `MAX_GROUND_SLOPE`, so no part of the
+ * valley is steeper than a walkable hillside — this is what rules out
+ * cliffs, steps and sudden shapes.
+ *
+ * Every cell is pulled down to at most its lowest neighbour plus one step.
+ * A forward sweep and a backward sweep propagate that constraint across the
+ * whole map the way a chamfer distance transform does, so two passes settle
+ * it however far the offending ground reaches.
+ */
+function limitSlopes(heights: Float32Array, width: number, height: number): void {
+  const step = MAX_GROUND_SLOPE / TERRAIN_HEIGHT;
+  const diagonal = step * Math.SQRT2;
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const i = y * width + x;
+      let cap = Infinity;
+      if (x > 0) cap = Math.min(cap, heights[i - 1] + step);
+      if (y > 0) cap = Math.min(cap, heights[i - width] + step);
+      if (x > 0 && y > 0) cap = Math.min(cap, heights[i - width - 1] + diagonal);
+      if (x < width - 1 && y > 0) cap = Math.min(cap, heights[i - width + 1] + diagonal);
+      if (heights[i] > cap) heights[i] = cap;
+    }
+  }
+  for (let y = height - 1; y >= 0; y--) {
+    for (let x = width - 1; x >= 0; x--) {
+      const i = y * width + x;
+      let cap = Infinity;
+      if (x < width - 1) cap = Math.min(cap, heights[i + 1] + step);
+      if (y < height - 1) cap = Math.min(cap, heights[i + width] + step);
+      if (x < width - 1 && y < height - 1) cap = Math.min(cap, heights[i + width + 1] + diagonal);
+      if (x > 0 && y < height - 1) cap = Math.min(cap, heights[i + width - 1] + diagonal);
+      if (heights[i] > cap) heights[i] = cap;
+    }
+  }
+}
+
+/**
+ * The elevation step a normalised height reads as. Steps no longer shape
+ * the ground — the height field does — but the simulation still talks in
+ * them when it asks how hard a slope is to build a road across.
+ */
+export function elevationForHeight(h: number): number {
+  if (h < SEA_LEVEL) return 0;
+  const above = inverseLerp(SEA_LEVEL, 1, h);
+  // A gentle curve keeps most of the valley within one or two steps while
+  // still letting the foothills climb.
+  return clamp(Math.round(above ** 1.45 * MAX_ELEVATION), 0, MAX_ELEVATION);
+}
+
+/** Normalised height at a tile, clamped to the map. */
+function sampleField(map: WorldMap, x: number, y: number): number {
+  const cx = x < 0 ? 0 : x > map.width - 1 ? map.width - 1 : x;
+  const cy = y < 0 ? 0 : y > map.height - 1 ? map.height - 1 : y;
+  return map.heightField[cy * map.width + cx];
+}
+
+/** One span of a Catmull-Rom spline through four samples. */
+function spline(a: number, b: number, c: number, d: number, t: number): number {
+  const t2 = t * t;
+  const t3 = t2 * t;
+  return (
+    0.5 *
+    (2 * b + (c - a) * t + (2 * a - 5 * b + 4 * c - d) * t2 + (-a + 3 * b - 3 * c + d) * t3)
+  );
+}
+
+/**
+ * The height of the ground under a point, in world units.
+ *
+ * Coordinates are continuous tile space: tile (x, y) covers the world square
+ * from (x, y) to (x + 1, y + 1), so its centre — where the height field is
+ * sampled — is at (x + 0.5, y + 0.5).
+ *
+ * The interpolation is bicubic rather than bilinear on purpose. Bilinear is
+ * only continuous in value, so it creases along every tile boundary and the
+ * grid comes straight back as a pattern of shallow ridges. A Catmull-Rom
+ * surface is continuous in slope as well, and reads as ground.
+ */
+export function surfaceHeight(map: WorldMap, worldX: number, worldY: number): number {
+  const fx = worldX - 0.5;
+  const fy = worldY - 0.5;
+  const x0 = Math.floor(fx);
+  const y0 = Math.floor(fy);
+  const tx = fx - x0;
+  const ty = fy - y0;
+
+  let rows = 0;
+  const row: number[] = [];
+  for (let j = -1; j <= 2; j++) {
+    row[rows++] = spline(
+      sampleField(map, x0 - 1, y0 + j),
+      sampleField(map, x0, y0 + j),
+      sampleField(map, x0 + 1, y0 + j),
+      sampleField(map, x0 + 2, y0 + j),
+      tx,
+    );
+  }
+  const h = spline(row[0], row[1], row[2], row[3], ty);
+  return h * TERRAIN_HEIGHT;
+}
+
+/** The height of the ground at the centre of a tile, in world units. */
+export function tileHeight(map: WorldMap, x: number, y: number): number {
+  return sampleField(map, x, y) * TERRAIN_HEIGHT;
+}
+
+/**
+ * The surface normal of the ground under a point, from the same spline the
+ * surface itself is built on.
+ */
+export function surfaceNormal(
+  map: WorldMap,
+  worldX: number,
+  worldY: number,
+  out: { x: number; y: number; z: number } = { x: 0, y: 1, z: 0 },
+): { x: number; y: number; z: number } {
+  const e = 0.35;
+  const dx = surfaceHeight(map, worldX + e, worldY) - surfaceHeight(map, worldX - e, worldY);
+  const dz = surfaceHeight(map, worldX, worldY + e) - surfaceHeight(map, worldX, worldY - e);
+  const nx = -dx;
+  const nz = -dz;
+  const ny = 2 * e;
+  const length = Math.hypot(nx, ny, nz) || 1;
+  out.x = nx / length;
+  out.y = ny / length;
+  out.z = nz / length;
+  return out;
+}
+
+/** Steepest rise from a tile to a cardinal neighbour, in world units. */
+export function groundSlopeAt(map: WorldMap, x: number, y: number): number {
+  const here = tileHeight(map, x, y);
+  let worst = 0;
+  for (const d of DIRECTIONS) {
+    if (!inBounds(map, x + d.x, y + d.y)) continue;
+    worst = Math.max(worst, Math.abs(tileHeight(map, x + d.x, y + d.y) - here));
+  }
+  return worst;
 }
 
 /** Chebyshev distance from every tile to the nearest water tile. */
@@ -696,34 +872,69 @@ function traceKingsRoad(map: WorldMap, from: Point, to: Point): Point[] {
 }
 
 /**
- * Cut and fill a level corridor along the road, and dry out any shallow
- * water it fords, so the starting street is flat and usable.
+ * Cut and fill a level corridor along the king's road.
+ *
+ * The road's own profile is smoothed and then held to a carriage grade, and
+ * the ground either side is drawn to it with a falloff, so the approach to
+ * the town is a graded way through the country rather than a stripe of
+ * flattened tiles.
  */
 function levelRoadCorridor(map: WorldMap, road: Point[]): void {
-  const { width } = map;
-  for (const p of road) {
-    const i = p.y * width + p.x;
-    const target = map.elevation[i];
-    for (let dy = -2; dy <= 2; dy++) {
-      for (let dx = -2; dx <= 2; dx++) {
+  const { width, heightField } = map;
+  if (road.length === 0) return;
+
+  // 1. The profile the road will actually run at.
+  const profile = new Float32Array(road.length);
+  for (let i = 0; i < road.length; i++) profile[i] = heightField[road[i].y * width + road[i].x];
+  for (let pass = 0; pass < 6; pass++) {
+    const previous = Float32Array.from(profile);
+    for (let i = 0; i < profile.length; i++) {
+      const before = previous[Math.max(0, i - 1)];
+      const after = previous[Math.min(previous.length - 1, i + 1)];
+      profile[i] = (before + previous[i] * 2 + after) * 0.25;
+    }
+  }
+  // 2. Hold it to a grade a loaded cart could manage, from both ends so the
+  //    limit is met whichever way the ground is climbing.
+  const grade = ROAD_GRADE / TERRAIN_HEIGHT;
+  for (let i = 1; i < profile.length; i++) {
+    profile[i] = clamp(profile[i], profile[i - 1] - grade, profile[i - 1] + grade);
+  }
+  for (let i = profile.length - 2; i >= 0; i--) {
+    profile[i] = clamp(profile[i], profile[i + 1] - grade, profile[i + 1] + grade);
+  }
+
+  // 3. Draw the ground to it, fading out over the verge.
+  const reach = 3;
+  for (let i = 0; i < road.length; i++) {
+    const p = road[i];
+    const target = profile[i];
+    for (let dy = -reach; dy <= reach; dy++) {
+      for (let dx = -reach; dx <= reach; dx++) {
         const nx = p.x + dx;
         const ny = p.y + dy;
         if (!inBounds(map, nx, ny)) continue;
         const ni = ny * width + nx;
-        const falloff = Math.max(Math.abs(dx), Math.abs(dy));
-        if (falloff <= 1) {
-          map.elevation[ni] = target;
-          if (isWater(map.terrain[ni] as Terrain)) {
-            map.terrain[ni] = Terrain.Grass;
-            map.heightField[ni] = SEA_LEVEL + 0.02;
-          }
-          // Clear a little of the canopy for the roadside.
-          map.treeDensity[ni] *= falloff === 0 ? 0 : 0.25;
-        } else {
-          map.elevation[ni] = Math.round(lerp(map.elevation[ni], target, 0.5));
+        const falloff = Math.hypot(dx, dy);
+        if (falloff > reach) continue;
+        const pull = smoothstep(reach, 0.9, falloff);
+        heightField[ni] = lerp(heightField[ni], target, pull);
+        if (pull > 0.5 && isWater(map.terrain[ni] as Terrain)) {
+          // The road is carried over on a causeway rather than fording.
+          map.terrain[ni] = Terrain.Grass;
+          heightField[ni] = Math.max(heightField[ni], SEA_LEVEL + 0.015);
         }
+        // Clear a little of the canopy for the roadside.
+        map.treeDensity[ni] *= falloff < 0.6 ? 0 : lerp(0.15, 1, smoothstep(1, reach, falloff));
       }
     }
+  }
+}
+
+/** Re-read the elevation steps from the height field after it is edited. */
+export function refreshElevation(map: WorldMap): void {
+  for (let i = 0; i < map.elevation.length; i++) {
+    map.elevation[i] = isWater(map.terrain[i] as Terrain) ? 0 : elevationForHeight(map.heightField[i]);
   }
 }
 

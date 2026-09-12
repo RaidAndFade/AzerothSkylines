@@ -1,102 +1,157 @@
 /**
- * The colour language of the game.
+ * The colour language of the game: England, around 1300.
  *
- * Stormwind reads as warm white stone under saturated blue slate, set in
- * the deep greens of Elwynn Forest. Everything here is hand-picked to sit
- * together, and the helpers below keep shading consistent across terrain,
- * buildings and walls.
+ * Nothing here is saturated, because nothing in a fourteenth-century
+ * landscape was. Walls are lime, daub, flint and oolitic limestone; roofs
+ * are wheat straw, oak shingle, stone slate and — on the richest buildings —
+ * clay tile and lead. The country is pasture green going to hay in high
+ * summer, hedged in hawthorn, under the thin grey-blue light of an island
+ * climate. The brightest thing in view is usually a limewashed gable.
+ *
+ * Every colour is written as '#rrggbb' here and converted to linear floats
+ * once, in `meshBuilder`, so the lighting adds up the way daylight does.
  */
 
 export const PALETTE = {
-  // --- Stormwind masonry --------------------------------------------------
-  stoneLight: '#F0E7D6',
-  stone: '#DCCFB8',
-  stoneMid: '#C2B296',
-  stoneDark: '#9C8C72',
-  stoneShadow: '#77694F',
+  // --- Masonry ------------------------------------------------------------
+  /** Oolitic limestone, the ashlar of a parish church or a gatehouse. */
+  limestone: '#C3BCA6',
+  limestoneLight: '#D6D0BC',
+  limestoneDark: '#9D9681',
+  /** Knapped flint with lime mortar, the common walling of the east. */
+  flint: '#736F68',
+  flintLight: '#908B82',
+  flintDark: '#4E4B46',
+  /** Rubble stone and fieldstone, what a farmstead is footed on. */
+  rubble: '#9A8F7C',
+  rubbleDark: '#6E6556',
+  /** Sandstone, warmer and softer, used for dressings. */
+  sandstone: '#B6A37D',
 
-  // --- Roofs, by district -------------------------------------------------
-  roofBlue: '#2C6BAE',
-  roofBlueLight: '#4C92D8',
-  roofBlueDark: '#1B4577',
-  roofRed: '#A3382F',
-  roofRedLight: '#C75A48',
-  roofRedDark: '#6C221D',
-  roofViolet: '#6B4A8F',
-  roofVioletLight: '#8D6BB3',
-  roofVioletDark: '#452D60',
-  roofGreen: '#3F7A4A',
-  roofGreenLight: '#5C9C65',
-  roofGreenDark: '#28522F',
+  // --- Walling ------------------------------------------------------------
+  /** Limewashed daub: the wall of nearly every building in the town. */
+  limewash: '#DCD4BD',
+  limewashShade: '#C0B69B',
+  /** Unlimed daub, on the poorest cottages. */
+  daub: '#BFAE8B',
+  daubShade: '#A08F6E',
+  /** Oak, weathered to silver-brown in the rain. */
+  oak: '#4C3A27',
+  oakLight: '#61492F',
+  oakDark: '#2E2319',
+  /** Riven oak boards, for barn walls and cart beds. */
+  board: '#6B5437',
+  boardDark: '#4A3926',
 
-  // --- Humble building materials -----------------------------------------
-  thatch: '#C9A860',
-  thatchLight: '#E0C481',
-  thatchDark: '#96783E',
-  timber: '#6B4A2C',
-  timberLight: '#8A6339',
-  timberDark: '#432C19',
-  plaster: '#E8DCC4',
-  plasterShade: '#CDBE9F',
+  // --- Roofing ------------------------------------------------------------
+  /** Wheat-straw thatch, fresh and weathered. */
+  thatch: '#A08248',
+  thatchLight: '#BE9E62',
+  thatchDark: '#6E5932',
+  /** Clay tile, iron-rich and muted — never pillar-box red. */
+  tile: '#96563F',
+  tileLight: '#AE6C50',
+  tileDark: '#66392A',
+  /** Stone slate: Horsham, Collyweston, Cotswold. */
+  stoneSlate: '#8A8377',
+  stoneSlateLight: '#A39B8D',
+  stoneSlateDark: '#625C53',
+  /** Oak shingle, greying with age. */
+  shingle: '#7A6B52',
+  shingleLight: '#95856A',
+  shingleDark: '#544836',
+  /** Lead, on a cathedral roof or a spire. */
+  lead: '#60625F',
+  leadLight: '#7E807C',
+  leadDark: '#3F413E',
 
-  // --- Elwynn ground ------------------------------------------------------
-  grass: '#6EA33E',
-  grassLight: '#85BC4D',
-  grassDark: '#527D2D',
-  meadow: '#8CBE52',
-  meadowLight: '#A5D267',
-  forestFloor: '#4A7A33',
-  forestFloorDark: '#385E27',
-  canopy: '#2F6B36',
-  canopyLight: '#448A45',
-  canopyDark: '#1E4A26',
-  canopyAutumn: '#7A6B2A',
+  // --- The country --------------------------------------------------------
+  grass: '#6E7A46',
+  grassLight: '#84904F',
+  grassDark: '#545E35',
+  /** Water meadow and pasture, a touch bluer and lusher. */
+  meadow: '#77864A',
+  meadowLight: '#8E9C59',
+  /** Hay and stubble in Goldharvest. */
+  stubble: '#A89A62',
+  /** The floor of an oak wood, mostly leaf litter. */
+  forestFloor: '#4E5536',
+  forestFloorDark: '#3A4029',
+  /** Oak and ash canopy. */
+  canopy: '#4B5A32',
+  canopyLight: '#5E6F3E',
+  canopyDark: '#343F23',
+  /** Hawthorn and birch, lighter and greyer. */
+  canopyPale: '#6A7448',
+  /** A field maple on the turn. */
+  canopyAutumn: '#8A7534',
+  /** Scots pine, almost blue in shadow. */
+  canopyPine: '#3B4A36',
 
-  sand: '#D9C48F',
-  sandDark: '#B8A070',
-  dirt: '#A08556',
-  dirtDark: '#7B6540',
+  /** Ploughed earth: the ridge and furrow of an open field. */
+  ploughed: '#6F5C43',
+  ploughedLight: '#866F51',
+  /** Standing corn. */
+  corn: '#B5A25F',
 
-  rock: '#8D8579',
-  rockLight: '#A9A196',
-  rockDark: '#635C52',
-  snow: '#EFEFE9',
-  snowShade: '#CFD3D6',
+  sand: '#C2B18A',
+  sandDark: '#A2916C',
+  /** River gravel and a muddy bank. */
+  gravel: '#9A8D75',
+  mud: '#7A6A52',
+  mudDark: '#5C4F3C',
+
+  chalk: '#BDB8A4',
+  chalkDark: '#8E8A78',
+  moor: '#6E6A52',
+  moorDark: '#514E3C',
+  snow: '#E4E4DE',
+  snowShade: '#C2C6C8',
 
   // --- Water --------------------------------------------------------------
-  waterDeep: '#1D5680',
-  water: '#2B7BA6',
-  waterLight: '#49A2C6',
-  waterShallow: '#63BBD4',
-  waterFoam: '#CFEDF3',
+  /** An English river: green-grey, never Mediterranean blue. */
+  waterDeep: '#2F545C',
+  water: '#3F6B72',
+  waterLight: '#557F84',
+  waterShallow: '#77A098',
+  waterFoam: '#CBD6CC',
 
-  // --- Roads --------------------------------------------------------------
-  cobble: '#8F8779',
-  cobbleLight: '#A8A092',
-  cobbleDark: '#6D665A',
-  flagstone: '#B9AE99',
-  flagstoneLight: '#D2C8B4',
-  flagstoneDark: '#8E8471',
-  path: '#A9915F',
-  pathDark: '#87724A',
+  // --- Ways ---------------------------------------------------------------
+  /** A packed-earth footpath, worn down to the subsoil. */
+  path: '#9C8358',
+  pathDark: '#75603C',
+  /** Cobbles: water-rounded stones set in sand, pale and dusty. */
+  cobble: '#A39C90',
+  cobbleLight: '#BAB3A6',
+  cobbleDark: '#6F6961',
+  /** Dressed flagstones, laid only where the town can afford them. */
+  flagstone: '#B8B2A1',
+  flagstoneLight: '#CFC9B7',
+  flagstoneDark: '#857F70',
 
   // --- Interface ----------------------------------------------------------
-  gold: '#F0C44A',
-  goldDark: '#B88A1E',
-  parchment: '#F3E7CC',
-  parchmentDark: '#D9C69C',
-  ink: '#3A2E1E',
-  alliance: '#2C6BAE',
-  allianceLight: '#5FA0DC',
-  crimson: '#B03A2E',
-  emerald: '#3E8E5A',
+  /** Gold leaf and ochre, off a manuscript initial. */
+  gold: '#C9A227',
+  goldDark: '#8E6F14',
+  parchment: '#E8DCC0',
+  parchmentDark: '#CBBB96',
+  /** Oak-gall ink. */
+  ink: '#2B2318',
+  /** Woad blue, the one good dye. */
+  woad: '#3A5A7A',
+  woadLight: '#5A7C9C',
+  /** Madder red. */
+  madder: '#8E3A2E',
+  /** Verdigris. */
+  verdigris: '#3E7A5E',
 
   // --- Zone paint ---------------------------------------------------------
-  zoneResidential: '#4E9E4A',
-  zoneCommercial: '#3C7FC4',
-  zoneIndustrial: '#C4923C',
+  zoneResidential: '#59A05C',
+  /** Violet-leaning, so an empty plot is never mistaken for water. */
+  zoneCommercial: '#6A6FB0',
+  zoneIndustrial: '#BC8730',
 
-  shadow: 'rgba(20, 16, 10, 0.28)',
+  shadow: 'rgba(24, 22, 16, 0.3)',
 } as const;
 
 export type PaletteColor = keyof typeof PALETTE;
@@ -135,16 +190,27 @@ export function withAlpha(hex: string, alpha: number): string {
 }
 
 /**
- * Roof colours for each Stormwind district, keyed the way the build menu
- * groups buildings. The blue of the Trade District is the city's signature.
+ * The roofing a building can be covered in, poorest first. What a town can
+ * afford to put over its head is the clearest sign of how it is doing, so
+ * these climb: straw, shingle, stone, tile, lead.
  */
 export const ROOF_SETS = {
-  blue: { main: PALETTE.roofBlue, light: PALETTE.roofBlueLight, dark: PALETTE.roofBlueDark },
-  red: { main: PALETTE.roofRed, light: PALETTE.roofRedLight, dark: PALETTE.roofRedDark },
-  violet: { main: PALETTE.roofViolet, light: PALETTE.roofVioletLight, dark: PALETTE.roofVioletDark },
-  green: { main: PALETTE.roofGreen, light: PALETTE.roofGreenLight, dark: PALETTE.roofGreenDark },
   thatch: { main: PALETTE.thatch, light: PALETTE.thatchLight, dark: PALETTE.thatchDark },
-  stone: { main: PALETTE.stoneMid, light: PALETTE.stone, dark: PALETTE.stoneDark },
+  shingle: { main: PALETTE.shingle, light: PALETTE.shingleLight, dark: PALETTE.shingleDark },
+  stoneSlate: { main: PALETTE.stoneSlate, light: PALETTE.stoneSlateLight, dark: PALETTE.stoneSlateDark },
+  tile: { main: PALETTE.tile, light: PALETTE.tileLight, dark: PALETTE.tileDark },
+  lead: { main: PALETTE.lead, light: PALETTE.leadLight, dark: PALETTE.leadDark },
+  limestone: { main: PALETTE.limestone, light: PALETTE.limestoneLight, dark: PALETTE.limestoneDark },
 } as const;
 
 export type RoofSet = keyof typeof ROOF_SETS;
+
+/** What each roofing is made of, for the way it is laid and lit. */
+export const ROOF_TEXTURE: Record<RoofSet, 'thatch' | 'shingle' | 'slate' | 'tile' | 'lead' | 'stone'> = {
+  thatch: 'thatch',
+  shingle: 'shingle',
+  stoneSlate: 'slate',
+  tile: 'tile',
+  lead: 'lead',
+  limestone: 'stone',
+};

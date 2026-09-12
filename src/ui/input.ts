@@ -2,8 +2,13 @@
  * Pointer, touch and keyboard input.
  *
  * Designed for a phone first: one finger pans while inspecting and draws
- * while a build tool is held, two fingers always pinch-zoom and pan, and
- * every gesture cancels cleanly if a finger is lifted mid-way.
+ * while a build tool is held, two fingers pinch to zoom, drag to pan and
+ * twist to turn the valley round, and every gesture cancels cleanly if a
+ * finger is lifted mid-way.
+ *
+ * On a desktop the right or middle button orbits — turning with the drag
+ * and tilting between a low view down the street and a high one over the
+ * whole district — and `Q` and `E` turn a quarter step at a time.
  */
 import { Camera } from '../render/camera';
 
@@ -41,6 +46,8 @@ interface ActivePointer {
   startY: number;
   startTime: number;
   moved: boolean;
+  /** True when this pointer is turning the camera rather than drawing. */
+  orbit: boolean;
 }
 
 export class InputController {
@@ -52,6 +59,8 @@ export class InputController {
   /** Distance between two fingers when the pinch began. */
   private pinchDistance = 0;
   private pinchCentre = { x: 0, y: 0 };
+  /** Angle between two fingers, so a twist turns the valley. */
+  private pinchAngle = 0;
   private dragging = false;
   private panning = false;
 
@@ -118,6 +127,8 @@ export class InputController {
       startY: point.y,
       startTime: performance.now(),
       moved: false,
+      // The right and middle buttons turn the camera, whatever tool is held.
+      orbit: event.button === 2 || event.button === 1,
     });
 
     if (this.pointers.size === 2) {
@@ -157,6 +168,11 @@ export class InputController {
 
     if (!pointer.moved) return;
 
+    if (pointer.orbit) {
+      this.camera.orbitByScreen(point.x - previousX, point.y - previousY);
+      return;
+    }
+
     if (this.handlers.isDrawing()) {
       if (!this.dragging) {
         this.dragging = true;
@@ -190,7 +206,12 @@ export class InputController {
       if (this.dragging) {
         this.dragging = false;
         this.handlers.onDragEnd();
-      } else if (!pointer.moved && !this.panning && performance.now() - pointer.startTime < TAP_TIMEOUT_MS) {
+      } else if (
+        !pointer.moved &&
+        !pointer.orbit &&
+        !this.panning &&
+        performance.now() - pointer.startTime < TAP_TIMEOUT_MS
+      ) {
         this.handlers.onTap(pointer.x, pointer.y);
       }
       this.panning = false;
@@ -206,6 +227,7 @@ export class InputController {
     const [a, b] = [...this.pointers.values()];
     this.pinchDistance = Math.hypot(b.x - a.x, b.y - a.y);
     this.pinchCentre = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+    this.pinchAngle = Math.atan2(b.y - a.y, b.x - a.x);
   }
 
   private updatePinch(): void {
@@ -221,8 +243,17 @@ export class InputController {
     // Two-finger drag pans as well as zooms.
     this.camera.panByScreen(centre.x - this.pinchCentre.x, centre.y - this.pinchCentre.y);
 
+    // And a twist turns the valley. Converted to the pixels an orbit drag
+    // would have taken, so a turn feels the same on a phone as on a mouse.
+    const angle = Math.atan2(b.y - a.y, b.x - a.x);
+    let turn = angle - this.pinchAngle;
+    while (turn > Math.PI) turn -= Math.PI * 2;
+    while (turn < -Math.PI) turn += Math.PI * 2;
+    if (Math.abs(turn) > 0.004) this.camera.orbitByScreen(turn / 0.006, 0);
+
     this.pinchDistance = distance;
     this.pinchCentre = centre;
+    this.pinchAngle = angle;
   }
 
   private onWheel = (event: WheelEvent): void => {
