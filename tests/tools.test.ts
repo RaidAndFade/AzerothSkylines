@@ -3,14 +3,17 @@ import { describe, expect, it } from 'vitest';
 import { RoadType, Zone } from '@/sim/types';
 import { PARCEL_SIZE, tileIndex } from '@/sim/city';
 import {
+  ZONE_PAINT_MODES,
   applyTool,
   defaultTool,
   elbowPath,
+  nextZonePaintMode,
   quoteTool,
   rectangle,
   tilesForDrag,
   toolDraws,
   toolHint,
+  zonePaintFor,
 } from '@/ui/tools';
 import { makeFlatCity, mainRoadY, zoneRect } from './helpers';
 
@@ -194,5 +197,38 @@ describe('committing a tool', () => {
     const before = city.budget.gold;
     expect(applyTool(city, defaultTool(), [{ x: 4, y: 4 }]).applied).toBe(0);
     expect(city.budget.gold).toBe(before);
+  });
+});
+
+describe('zoning paint strength', () => {
+  it('shouts while the player is zoning and whispers otherwise', () => {
+    const tool = defaultTool();
+    expect(zonePaintFor('auto', { ...tool, kind: 'zone' })).toBe('full');
+    expect(zonePaintFor('auto', { ...tool, kind: 'zone', zone: Zone.None })).toBe('full');
+    // Demolition clears zoning too, so the districts come back up for it.
+    expect(zonePaintFor('auto', { ...tool, kind: 'demolish' })).toBe('full');
+    for (const kind of ['inspect', 'road', 'build', 'land'] as const) {
+      expect(zonePaintFor('auto', { ...tool, kind })).toBe('ambient');
+    }
+  });
+
+  it('lets the chip override the tool either way', () => {
+    const tool = defaultTool();
+    expect(zonePaintFor('always', tool)).toBe('full');
+    expect(zonePaintFor('always', { ...tool, kind: 'zone' })).toBe('full');
+    expect(zonePaintFor('off', tool)).toBe('hidden');
+    expect(zonePaintFor('off', { ...tool, kind: 'zone' })).toBe('hidden');
+  });
+
+  it('cycles through every mode and back to the start', () => {
+    let mode = ZONE_PAINT_MODES[0];
+    const seen = [mode];
+    for (let i = 0; i < ZONE_PAINT_MODES.length - 1; i++) {
+      mode = nextZonePaintMode(mode);
+      expect(seen).not.toContain(mode);
+      seen.push(mode);
+    }
+    expect(seen).toHaveLength(ZONE_PAINT_MODES.length);
+    expect(nextZonePaintMode(mode)).toBe(ZONE_PAINT_MODES[0]);
   });
 });

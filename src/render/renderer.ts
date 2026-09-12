@@ -9,7 +9,16 @@
 import { ELEVATION_STEP, HALF_HEIGHT, HALF_WIDTH, depthOf } from './iso';
 import { PALETTE, mix, withAlpha } from './palette';
 import { Camera } from './camera';
-import { DETAIL_ZOOM, FLORA_ZOOM, TileRange, ViewRect, drawTerrain, strokeTile, strokeTileRect } from './terrainLayer';
+import {
+  DETAIL_ZOOM,
+  FLORA_ZOOM,
+  TileRange,
+  ViewRect,
+  ZonePaint,
+  drawTerrain,
+  strokeTile,
+  strokeTileRect,
+} from './terrainLayer';
 import { GroundField, buildGroundField } from './groundTexture';
 import { getBuildingSprite } from './buildingSprites';
 import { Sprite, getAgentSprite, getPropSprite, getTreeSprite, getWallSprite } from './propSprites';
@@ -41,7 +50,8 @@ export interface RenderOptions {
   /** Seconds since the game started, for animation. */
   time: number;
   overlay: Overlay;
-  showZones: boolean;
+  /** How loudly to paint the zoning overlay, if at all. */
+  zonePaint: ZonePaint;
   hoverTile: { x: number; y: number } | null;
   preview: BuildPreview | null;
   selectedBuilding: number | null;
@@ -184,7 +194,7 @@ export class Renderer {
     const range = this.camera.visibleTileRect(city.width, city.height);
     drawTerrain(ctx, city, this.groundField(city), view, range, {
       time: options.time,
-      showZones: options.showZones,
+      zonePaint: options.zonePaint,
       zoom: this.camera.zoom,
     });
 

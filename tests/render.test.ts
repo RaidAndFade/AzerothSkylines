@@ -15,8 +15,10 @@ import {
 import { PALETTE, ROOF_SETS, hexToRgb, mix, rgbToHex, shade, withAlpha } from '@/render/palette';
 import { Camera, MAX_ZOOM, MIN_ZOOM } from '@/render/camera';
 import { buildingDepth, directionOf, sampleElevation, scatterDepth } from '@/render/renderer';
-import { makeFlatCity } from './helpers';
+import { inZoneRegion } from '@/render/terrainLayer';
+import { makeFlatCity, mainRoadY, zoneRect } from './helpers';
 import { tileIndex } from '@/sim/city';
+import { Zone } from '@/sim/types';
 
 describe('isometric projection', () => {
   it('keeps the classic 2:1 diamond', () => {
@@ -291,5 +293,34 @@ describe('agent facing', () => {
       expect(direction).toBeGreaterThanOrEqual(0);
       expect(direction).toBeLessThan(4);
     }
+  });
+});
+
+describe('zoning region outline', () => {
+  it('only counts unbuilt tiles of the same zone at the same height', () => {
+    const city = makeFlatCity();
+    const y = mainRoadY();
+    zoneRect(city, Zone.Residential, 3, y + 1, 3, 2);
+    const step = city.map.elevation[tileIndex(city, 3, y + 1)];
+
+    expect(inZoneRegion(city, 4, y + 1, Zone.Residential, step)).toBe(true);
+    // A different zone, or unzoned ground, is outside the region.
+    expect(inZoneRegion(city, 4, y + 1, Zone.Commercial, step)).toBe(false);
+    expect(inZoneRegion(city, 9, y + 1, Zone.Residential, step)).toBe(false);
+    // So is a tile on another step: the two diamonds share no screen edge.
+    expect(inZoneRegion(city, 4, y + 1, Zone.Residential, step + 1)).toBe(false);
+    // And so is a plot that has grown a building, which draws its own walls.
+    city.buildingAt[tileIndex(city, 4, y + 1)] = 7;
+    expect(inZoneRegion(city, 4, y + 1, Zone.Residential, step)).toBe(false);
+  });
+
+  it('treats everything off the map as outside', () => {
+    const city = makeFlatCity();
+    zoneRect(city, Zone.Residential, 0, 0, 1, 1);
+    const step = city.map.elevation[tileIndex(city, 0, 0)];
+    expect(inZoneRegion(city, -1, 0, Zone.Residential, step)).toBe(false);
+    expect(inZoneRegion(city, 0, -1, Zone.Residential, step)).toBe(false);
+    expect(inZoneRegion(city, city.width, 0, Zone.Residential, step)).toBe(false);
+    expect(inZoneRegion(city, 0, city.height, Zone.Residential, step)).toBe(false);
   });
 });

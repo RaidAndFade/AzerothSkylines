@@ -42,7 +42,7 @@ export interface ViewRect {
 
 export interface TerrainDrawOptions {
   time: number;
-  showZones: boolean;
+  zonePaint: ZonePaint;
   zoom: number;
 }
 
@@ -57,19 +57,63 @@ interface LevelPatch {
 
 const visited = new Map<number, Uint8Array>();
 const patches: LevelPatch[] = [];
-const zonePaths: (Path2D | null)[] = [];
+const zoneFills: (Path2D | null)[] = [];
+const zoneEdges: (Path2D | null)[] = [];
 let grainPattern: CanvasPattern | null = null;
 let grainSource: HTMLCanvasElement | null = null;
 
-const ZONE_FILL: Record<number, string> = {
-  [Zone.Residential]: withAlpha(PALETTE.zoneResidential, 0.34),
-  [Zone.Commercial]: withAlpha(PALETTE.zoneCommercial, 0.34),
-  [Zone.Industrial]: withAlpha(PALETTE.zoneIndustrial, 0.34),
+/**
+ * How loudly the zoning overlay is painted.
+ *
+ * `full` is for the moment the player is actually drawing districts, when
+ * the zone is the only thing they are looking at. `ambient` is the whisper
+ * of tint that persists the rest of the time: enough to say "this yard is
+ * dwellings", faint enough that the baked ground colour and the grain
+ * underneath still read through it.
+ */
+export type ZonePaint = 'hidden' | 'ambient' | 'full';
+
+/** Tiles are drawn a shade over size so neighbours leave no seam. */
+const ZONE_OVERDRAW = 1.02;
+
+/**
+ * The band that fades inward from a district's edge, in world pixels. Two
+ * strokes of the same colour, clipped to the region, so the tint gathers at
+ * the boundary and thins out towards the middle — a plan drawing rather
+ * than a slab of paint.
+ */
+const ZONE_BAND_WIDTHS = [HALF_HEIGHT * 3, HALF_HEIGHT * 1.2];
+
+interface ZoneStyle {
+  fill: string;
+  edge: string;
+  band: string;
+  lineWidth: number;
+}
+
+const ZONE_COLOURS: Record<number, string> = {
+  [Zone.Residential]: PALETTE.zoneResidential,
+  [Zone.Commercial]: PALETTE.zoneCommercial,
+  [Zone.Industrial]: PALETTE.zoneIndustrial,
 };
-const ZONE_EDGE: Record<number, string> = {
-  [Zone.Residential]: withAlpha(PALETTE.zoneResidential, 0.8),
-  [Zone.Commercial]: withAlpha(PALETTE.zoneCommercial, 0.8),
-  [Zone.Industrial]: withAlpha(PALETTE.zoneIndustrial, 0.8),
+
+function zoneStyles(fill: number, edge: number, band: number, lineWidth: number): (ZoneStyle | null)[] {
+  const styles: (ZoneStyle | null)[] = [];
+  for (const zone of [Zone.Residential, Zone.Commercial, Zone.Industrial]) {
+    const colour = ZONE_COLOURS[zone];
+    styles[zone] = {
+      fill: withAlpha(colour, fill),
+      edge: withAlpha(colour, edge),
+      band: withAlpha(colour, band),
+      lineWidth,
+    };
+  }
+  return styles;
+}
+
+const ZONE_STYLES: Record<Exclude<ZonePaint, 'hidden'>, (ZoneStyle | null)[]> = {
+  ambient: zoneStyles(0.09, 0.5, 0.1, 2),
+  full: zoneStyles(0.2, 0.9, 0.16, 3),
 };
 
 /** Paint the ground for every tile in range. The camera transform is live. */
@@ -94,7 +138,7 @@ export function drawTerrain(
     drawWaterSheen(ctx, city, view, range, options.time);
   }
   drawUnowned(ctx, city, view, range);
-  if (options.showZones) drawZones(ctx, city, view, range, detail);
+  if (options.zonePaint !== 'hidden') drawZones(ctx, city, view, range, detail, options.zonePaint);
 }
 
 /**
@@ -395,43 +439,129 @@ function drawUnowned(
   ctx.fill(path);
 }
 
+/**
+ * The zoning overlay: a tinted region per zone, outlined along its true
+ * outer boundary.
+ *
+ * Only the edges that face out of a district are stroked, so the outline
+ * traces the region itself and the tile grid inside it is never drawn.
+ */
 function drawZones(
   ctx: CanvasRenderingContext2D,
   city: CityState,
   view: ViewRect,
   range: TileRange,
   detail: boolean,
+  paint: Exclude<ZonePaint, 'hidden'>,
 ): void {
-  zonePaths.length = 0;
+  zoneFills.length = 0;
+  zoneEdges.length = 0;
   const width = city.width;
   for (let y = range.y0; y <= range.y1; y++) {
     for (let x = range.x0; x <= range.x1; x++) {
       const index = y * width + x;
       const zone = city.zones[index];
       if (zone === Zone.None || city.buildingAt[index] >= 0) continue;
+      const step = city.map.elevation[index];
       const cx = (x - y) * HALF_WIDTH;
-      const cy = (x + y) * HALF_HEIGHT - city.map.elevation[index] * ELEVATION_STEP;
+      const cy = (x + y) * HALF_HEIGHT - step * ELEVATION_STEP;
       if (cx + HALF_WIDTH < view.left || cx - HALF_WIDTH > view.right) continue;
       if (cy + HALF_HEIGHT < view.top || cy - HALF_HEIGHT > view.bottom) continue;
-      let path = zonePaths[zone];
-      if (!path) {
-        path = new Path2D();
-        zonePaths[zone] = path;
+      let fill = zoneFills[zone];
+      if (!fill) {
+        fill = new Path2D();
+        zoneFills[zone] = fill;
       }
-      addDiamond(path, cx, cy, 1.02);
+      addDiamond(fill, cx, cy, ZONE_OVERDRAW);
+      if (!detail) continue;
+      let edge = zoneEdges[zone];
+      if (!edge) {
+        edge = new Path2D();
+        zoneEdges[zone] = edge;
+      }
+      addZoneBoundary(edge, city, x, y, zone, step, cx, cy);
     }
   }
-  for (let i = 0; i < zonePaths.length; i++) {
-    const path = zonePaths[i];
-    if (!path) continue;
-    if (detail) {
-      ctx.strokeStyle = ZONE_EDGE[i];
-      ctx.lineWidth = 3;
-      ctx.lineJoin = 'round';
-      ctx.stroke(path);
+
+  // Saved as a block: the band strokes leave a round line cap behind, and
+  // everything drawn after the ground expects the default.
+  ctx.save();
+  for (let zone = 0; zone < zoneFills.length; zone++) {
+    const fill = zoneFills[zone];
+    const style = ZONE_STYLES[paint][zone];
+    if (!fill || !style) continue;
+    ctx.fillStyle = style.fill;
+    ctx.fill(fill);
+
+    const edge = zoneEdges[zone];
+    if (!edge) continue;
+    // The band strokes straddle the boundary; clipping to the region throws
+    // away their outer halves and leaves a soft fade inwards.
+    ctx.save();
+    ctx.clip(fill);
+    ctx.strokeStyle = style.band;
+    ctx.lineCap = 'round';
+    for (const bandWidth of ZONE_BAND_WIDTHS) {
+      ctx.lineWidth = bandWidth;
+      ctx.stroke(edge);
     }
-    ctx.fillStyle = ZONE_FILL[i];
-    ctx.fill(path);
+    ctx.restore();
+
+    ctx.strokeStyle = style.edge;
+    ctx.lineWidth = style.lineWidth;
+    ctx.lineCap = 'round';
+    ctx.stroke(edge);
+  }
+  ctx.restore();
+}
+
+/**
+ * Whether a neighbouring tile belongs to the same painted region: same zone,
+ * still unbuilt, and at the same height, since tiles on different steps do
+ * not share a screen edge to hide.
+ */
+export function inZoneRegion(city: CityState, x: number, y: number, zone: Zone, elevation: number): boolean {
+  if (x < 0 || y < 0 || x >= city.width || y >= city.height) return false;
+  const index = y * city.width + x;
+  return city.zones[index] === zone && city.buildingAt[index] < 0 && city.map.elevation[index] === elevation;
+}
+
+/**
+ * Add the edges of one tile's diamond that face out of its region. Tile +x
+ * lies down-right on screen and tile +y down-left, so each neighbour owns
+ * exactly one of the four edges.
+ */
+function addZoneBoundary(
+  path: Path2D,
+  city: CityState,
+  x: number,
+  y: number,
+  zone: Zone,
+  elevation: number,
+  cx: number,
+  cy: number,
+): void {
+  const hw = HALF_WIDTH * ZONE_OVERDRAW;
+  const hh = HALF_HEIGHT * ZONE_OVERDRAW;
+  const top = cy - hh;
+  const bottom = cy + hh;
+  const left = cx - hw;
+  const right = cx + hw;
+  if (!inZoneRegion(city, x, y - 1, zone, elevation)) {
+    path.moveTo(cx, top);
+    path.lineTo(right, cy);
+  }
+  if (!inZoneRegion(city, x + 1, y, zone, elevation)) {
+    path.moveTo(right, cy);
+    path.lineTo(cx, bottom);
+  }
+  if (!inZoneRegion(city, x, y + 1, zone, elevation)) {
+    path.moveTo(cx, bottom);
+    path.lineTo(left, cy);
+  }
+  if (!inZoneRegion(city, x - 1, y, zone, elevation)) {
+    path.moveTo(left, cy);
+    path.lineTo(cx, top);
   }
 }
 

@@ -16,7 +16,14 @@ import {
 } from '../sim/types';
 import { CityState, ROAD_NAMES, buildingCenter, tileIndex } from '../sim/city';
 import { PLACEABLE_DEFS, getDef } from '../data/buildings';
-import { ToolKind, ToolState, toolHint } from './tools';
+import {
+  ToolKind,
+  ToolState,
+  ZONE_PAINT_LABELS,
+  ZonePaintMode,
+  nextZonePaintMode,
+  toolHint,
+} from './tools';
 import { Overlay } from '../render/renderer';
 import { append, button, clear, compact, el, gold, percent, statRow } from './dom';
 import { quoteParcel } from '../sim/build';
@@ -33,7 +40,7 @@ export interface HudCallbacks {
   onNewCity(): void;
   onSave(): void;
   onLoad(): void;
-  onToggleZones(): void;
+  onZonePaintChange(mode: ZonePaintMode): void;
   onFocusBuilding(building: Building): void;
 }
 
@@ -101,7 +108,7 @@ export class Hud {
   private landSelection: { px: number; py: number } | null = null;
   private currentTool: ToolState;
   private currentOverlay: Overlay = 'none';
-  private showZones = true;
+  private zonePaintMode: ZonePaintMode = 'auto';
 
   constructor(root: HTMLElement, tool: ToolState, callbacks: HudCallbacks) {
     this.root = root;
@@ -662,11 +669,11 @@ export class Hud {
       el('div', { class: 'section-title', text: 'Map View' }),
       chips,
       el('div', { class: 'section-title', text: 'Display' }),
-      button(`chip ${this.showZones ? 'active' : ''}`, () => {
-        this.showZones = !this.showZones;
-        this.callbacks.onToggleZones();
+      button(`chip ${this.zonePaintMode === 'off' ? '' : 'active'}`, () => {
+        this.zonePaintMode = nextZonePaintMode(this.zonePaintMode);
+        this.callbacks.onZonePaintChange(this.zonePaintMode);
         if (this.city) this.renderPanel(this.city);
-      }, this.showZones ? 'Zoning paint: shown' : 'Zoning paint: hidden'),
+      }, ZONE_PAINT_LABELS[this.zonePaintMode]),
     ]);
   }
 
@@ -759,8 +766,8 @@ export class Hud {
     this.hint.classList.remove('show');
   }
 
-  get zonesVisible(): boolean {
-    return this.showZones;
+  get zonePaint(): ZonePaintMode {
+    return this.zonePaintMode;
   }
 
   get overlay(): Overlay {

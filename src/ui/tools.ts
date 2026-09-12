@@ -13,6 +13,7 @@ import { canZone, setZone } from '../sim/zoning';
 import { demolish, evaluatePlacement, placeBuilding, quoteParcel } from '../sim/build';
 import { getDef } from '../data/buildings';
 import type { BuildPreview } from '../render/renderer';
+import type { ZonePaint } from '../render/terrainLayer';
 
 export type ToolKind = 'inspect' | 'road' | 'zone' | 'build' | 'demolish' | 'land';
 
@@ -30,6 +31,36 @@ export function defaultTool(): ToolState {
 /** Tools that draw with a one-finger drag rather than panning the map. */
 export function toolDraws(tool: ToolState): boolean {
   return tool.kind === 'road' || tool.kind === 'zone' || tool.kind === 'demolish';
+}
+
+/**
+ * What the player asked of the zoning overlay.
+ *
+ * `auto` is the default and the point of the setting: districts are painted
+ * at full strength while the player is drawing or clearing them, and only
+ * whispered the rest of the time, so open ground reads as ground. The other
+ * two modes pin it on or off.
+ */
+export type ZonePaintMode = 'auto' | 'always' | 'off';
+
+export const ZONE_PAINT_MODES: ZonePaintMode[] = ['auto', 'always', 'off'];
+
+export const ZONE_PAINT_LABELS: Record<ZonePaintMode, string> = {
+  auto: 'Zoning paint: while zoning',
+  always: 'Zoning paint: always',
+  off: 'Zoning paint: off',
+};
+
+/** The next mode the display chip cycles to. */
+export function nextZonePaintMode(mode: ZonePaintMode): ZonePaintMode {
+  return ZONE_PAINT_MODES[(ZONE_PAINT_MODES.indexOf(mode) + 1) % ZONE_PAINT_MODES.length];
+}
+
+/** How hard the renderer should paint zones, given the mode and the tool. */
+export function zonePaintFor(mode: ZonePaintMode, tool: ToolState): ZonePaint {
+  if (mode === 'off') return 'hidden';
+  if (mode === 'always') return 'full';
+  return tool.kind === 'zone' || tool.kind === 'demolish' ? 'full' : 'ambient';
 }
 
 export interface TilePoint {

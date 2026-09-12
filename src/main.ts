@@ -16,7 +16,16 @@ import { Renderer, Overlay, BuildPreview } from './render/renderer';
 import { tileToWorld } from './render/iso';
 import { Hud } from './ui/hud';
 import { InputController } from './ui/input';
-import { ToolState, applyTool, defaultTool, quoteTool, tilesForDrag, toolDraws, toolHint } from './ui/tools';
+import {
+  ToolState,
+  applyTool,
+  defaultTool,
+  quoteTool,
+  tilesForDrag,
+  toolDraws,
+  toolHint,
+  zonePaintFor,
+} from './ui/tools';
 import { createTitleScreen, randomValleyName } from './ui/title';
 import { el } from './ui/dom';
 
@@ -67,8 +76,8 @@ class Game {
       onNewCity: () => this.newCity(),
       onSave: () => this.save(true),
       onLoad: () => this.load(),
-      onToggleZones: () => {
-        /* the HUD holds the flag; nothing else to do */
+      onZonePaintChange: () => {
+        /* the HUD holds the mode; the frame loop reads it */
       },
       onFocusBuilding: (building) => {
         const centre = buildingCenter(building);
@@ -160,7 +169,7 @@ class Game {
     this.renderer.render(this.city, {
       time: this.elapsed,
       overlay: this.overlay,
-      showZones: this.hud.zonesVisible,
+      zonePaint: zonePaintFor(this.hud.zonePaint, this.tool),
       hoverTile: this.hoverTile,
       preview: this.preview,
       selectedBuilding: this.selectedBuildingId,
