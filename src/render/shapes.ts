@@ -125,6 +125,71 @@ export function strokeSilhouette(ctx: CanvasRenderingContext2D, points: Point[])
   ctx.stroke();
 }
 
+/**
+ * The line a gable roof's ridge runs along, without drawing the roof.
+ *
+ * Anything that has to stand on the roof — a chimney, a stack — needs the
+ * same geometry the roof itself is built from, so both take it from here
+ * and cannot drift apart.
+ */
+export function gableRidge(
+  top: Point[],
+  roofHeight: number,
+  axis: 0 | 1,
+  overhang = 4,
+): { start: Point; end: Point } {
+  const [north, east, south, west] = expand(top, overhang);
+  const midA = axis === 0 ? midpoint(north, west) : midpoint(north, east);
+  const midB = axis === 0 ? midpoint(east, south) : midpoint(west, south);
+  return {
+    start: { x: midA.x, y: midA.y - roofHeight },
+    end: { x: midB.x, y: midB.y - roofHeight },
+  };
+}
+
+/** The point a hip roof rises to, without drawing the roof. */
+export function hipApex(top: Point[], roofHeight: number, overhang = 4): Point {
+  const centre = centroid(expand(top, overhang));
+  return { x: centre.x, y: centre.y - roofHeight };
+}
+
+/**
+ * Order the points of a roofline from left to right, which is what
+ * `clipAboveRoofline` needs to turn it into a region.
+ */
+export function leftToRight(points: Point[]): Point[] {
+  return [...points].sort((a, b) => a.x - b.x);
+}
+
+/**
+ * Clip to everything above a roofline, so whatever is drawn next is cut by
+ * the roof's own silhouette instead of painted over it. Call inside a
+ * `ctx.save()`/`ctx.restore()` pair.
+ *
+ * `line` runs left to right; it is continued beyond both ends along its own
+ * slope, so a stack near the end of a ridge is still cut correctly.
+ */
+export function clipAboveRoofline(ctx: CanvasRenderingContext2D, line: Point[]): void {
+  if (line.length < 2) return;
+  const span = 4000;
+  const extend = (from: Point, towards: Point): Point => {
+    const dx = from.x - towards.x;
+    const dy = from.y - towards.y;
+    const length = Math.hypot(dx, dy) || 1;
+    return { x: from.x + (dx / length) * span, y: from.y + (dy / length) * span };
+  };
+  const left = extend(line[0], line[1]);
+  const right = extend(line[line.length - 1], line[line.length - 2]);
+  polygon(ctx, [
+    left,
+    ...line,
+    right,
+    { x: right.x, y: right.y - span },
+    { x: left.x, y: left.y - span },
+  ]);
+  ctx.clip();
+}
+
 /** A four-sided hipped roof rising to a point. */
 export function hipRoof(
   ctx: CanvasRenderingContext2D,
@@ -134,8 +199,7 @@ export function hipRoof(
   overhang = 4,
 ): Point {
   const eaves = expand(top, overhang);
-  const centre = centroid(eaves);
-  const apex = { x: centre.x, y: centre.y - roofHeight };
+  const apex = hipApex(top, roofHeight, overhang);
   const [north, east, south, west] = eaves;
 
   // Far slopes first, then the two the viewer actually sees.
@@ -170,11 +234,7 @@ export function gableRoof(
 ): { start: Point; end: Point } {
   const eaves = expand(top, overhang);
   const [north, east, south, west] = eaves;
-
-  const midA = axis === 0 ? midpoint(north, west) : midpoint(north, east);
-  const midB = axis === 0 ? midpoint(east, south) : midpoint(west, south);
-  const start = { x: midA.x, y: midA.y - roofHeight };
-  const end = { x: midB.x, y: midB.y - roofHeight };
+  const { start, end } = gableRidge(top, roofHeight, axis, overhang);
 
   if (axis === 0) {
     paintFace(ctx, [start, end, east, north], skin.material, skin.color, { surface: 'right', exposure: -0.06, seed: skin.seed });

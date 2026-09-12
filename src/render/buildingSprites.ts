@@ -16,16 +16,21 @@ import {
   Skin,
   banner,
   castShadow,
+  centroid,
+  clipAboveRoofline,
   coneRoof,
   cylinder,
   expand,
   fillFace,
   footprintCorners,
+  gableRidge,
   gableRoof,
   groundShadow,
+  hipApex,
   hipRoof,
   insetFootprint,
   isoBox,
+  leftToRight,
   lerpPoint,
   midpoint,
   polygon,
@@ -345,10 +350,10 @@ function drawMainMass(context: DrawContext): void {
   castShadow(ctx, corners, wallHeight + roofHeight * 0.6, 0.18);
 
   // Grander buildings sit on a plinth, which reads as weight.
-  const plinth = wallHeight > 34 ? 5 : 0;
-  let base = corners;
+  const plinth = plinthHeight(wallHeight);
+  let base = wallFootprint(context);
   if (plinth > 0) {
-    base = isoBox(ctx, expand(corners, 2), plinth, {
+    base = isoBox(ctx, base, plinth, {
       material: 'granite',
       color: PALETTE.stoneMid,
       seed: variant,
@@ -364,28 +369,134 @@ function drawMainMass(context: DrawContext): void {
   }
   drawDoor(ctx, base, wallHeight, facing);
 
+  const overhang = roofOverhang(context);
   switch (style.roofShape) {
     case 'hip':
-      hipRoof(ctx, top, roofHeight, roofSkin, 5);
+      hipRoof(ctx, top, roofHeight, roofSkin, overhang);
       break;
     case 'cone': {
-      const centre = { x: (top[1].x + top[3].x) / 2, y: (top[0].y + top[2].y) / 2 };
-      coneRoof(ctx, centre, (def.width + def.height) * HALF_WIDTH * 0.36, HALF_HEIGHT * 0.6, roofHeight, roofSkin);
+      const cone = coneGeometry(context, top);
+      coneRoof(ctx, cone.centre, cone.radiusX, cone.radiusY, roofHeight, roofSkin);
       break;
     }
     case 'flat':
-      drawFlatRoof(ctx, top, roofSkin);
+      drawFlatRoof(ctx, top, roofSkin, overhang);
       break;
     default:
-      gableRoof(
-        ctx,
-        top,
-        roofHeight,
-        roofSkin,
-        def.width === def.height ? ((variant % 2) as 0 | 1) : def.width > def.height ? 0 : 1,
-        def.width * def.height > 1 ? 5 : 3,
-      );
+      gableRoof(ctx, top, roofHeight, roofSkin, gableAxis(context), overhang);
       break;
+  }
+}
+
+// --- Roof geometry ----------------------------------------------------------
+//
+// The roof is drawn by `drawMainMass` and stood on by the features that
+// follow it, so where it sits is worked out here once and read by both.
+
+/** Grander buildings sit on a plinth, which the roof has to clear. */
+function plinthHeight(wallHeight: number): number {
+  return wallHeight > 34 ? 5 : 0;
+}
+
+/** The footprint the walls stand on, widened where there is a plinth. */
+function wallFootprint(context: DrawContext): Point[] {
+  return plinthHeight(context.wallHeight) > 0 ? expand(context.corners, 2) : context.corners;
+}
+
+/** The corners of the wall head — the plate the roof is built on. */
+function wallTop(context: DrawContext): Point[] {
+  return raise(wallFootprint(context), context.wallHeight + plinthHeight(context.wallHeight));
+}
+
+/** How far the roof oversails the wall below it. */
+function roofOverhang(context: DrawContext): number {
+  if (context.style.roofShape === 'gable') {
+    return context.def.width * context.def.height > 1 ? 5 : 3;
+  }
+  return context.style.roofShape === 'flat' ? 4 : 5;
+}
+
+/** Which way a gable's ridge runs: along the long side, or by variant. */
+function gableAxis(context: DrawContext): 0 | 1 {
+  const { def, variant } = context;
+  if (def.width === def.height) return (variant % 2) as 0 | 1;
+  return def.width > def.height ? 0 : 1;
+}
+
+function coneGeometry(
+  context: DrawContext,
+  top: Point[],
+): { centre: Point; radiusX: number; radiusY: number } {
+  const { def } = context;
+  return {
+    centre: { x: (top[1].x + top[3].x) / 2, y: (top[0].y + top[2].y) / 2 },
+    radiusX: (def.width + def.height) * HALF_WIDTH * 0.36,
+    radiusY: HALF_HEIGHT * 0.6,
+  };
+}
+
+/** A place on the roof for something that has to stand on it. */
+interface RoofMount {
+  /** A point on the roof surface itself. */
+  anchor: Point;
+  /** How far below the anchor the foot is buried, so it leaves no gap. */
+  sink: number;
+  /**
+   * The roofline that hides the foot, ordered left to right. Anything below
+   * it is behind roof the viewer can see, so it is clipped away instead of
+   * being painted over the slope.
+   */
+  cut?: Point[];
+}
+
+/**
+ * Where a stack meets the roof. `along` runs 0..1 from one end of the ridge
+ * to the other; on a roof that peaks at a point it picks a side instead.
+ */
+function roofMount(context: DrawContext, along: number): RoofMount {
+  const { style, roofHeight, centre, wallHeight } = context;
+  const top = wallTop(context);
+  const overhang = roofOverhang(context);
+  const eaves = expand(top, overhang);
+  const [north, east, , west] = eaves;
+
+  switch (style.roofShape) {
+    case 'hip': {
+      const apex = hipApex(top, roofHeight, overhang);
+      // Behind the peak, so the near slopes cut the foot of the stack.
+      const back = midpoint(north, along < 0.5 ? east : west);
+      return {
+        anchor: lerpPoint(apex, back, 0.3),
+        sink: roofHeight * 0.8,
+        cut: leftToRight([west, apex, east]),
+      };
+    }
+    case 'cone': {
+      const cone = coneGeometry(context, top);
+      const tip = { x: cone.centre.x, y: cone.centre.y - roofHeight };
+      return {
+        anchor: lerpPoint(tip, cone.centre, 0.3),
+        sink: roofHeight * 0.5,
+        cut: leftToRight([
+          { x: cone.centre.x - cone.radiusX, y: cone.centre.y },
+          tip,
+          { x: cone.centre.x + cone.radiusX, y: cone.centre.y },
+        ]),
+      };
+    }
+    case 'flat':
+      // No slope to emerge from: the stack stands on the parapet instead.
+      return { anchor: lerpPoint(centroid(eaves), north, 0.7 - along * 0.3), sink: 4 };
+    case 'none':
+      return { anchor: { x: centre.x, y: centre.y - wallHeight }, sink: 0 };
+    default: {
+      const { start, end } = gableRidge(top, roofHeight, gableAxis(context), overhang);
+      return {
+        anchor: lerpPoint(start, end, along),
+        sink: roofHeight,
+        cut: leftToRight([west, start, end, east]),
+      };
+    }
   }
 }
 
@@ -395,8 +506,8 @@ function drawGroundOnlyBuilding(context: DrawContext): void {
   fillFace(ctx, corners, withAlpha(PALETTE.dirt, 0.35), false);
 }
 
-function drawFlatRoof(ctx: CanvasRenderingContext2D, top: Point[], skin: Skin): void {
-  const eaves = expand(top, 4);
+function drawFlatRoof(ctx: CanvasRenderingContext2D, top: Point[], skin: Skin, overhang = 4): void {
+  const eaves = expand(top, overhang);
   paintFace(ctx, eaves, skin.material, skin.color, { surface: 'top', seed: skin.seed, occlude: false });
   strokeSilhouette(ctx, eaves);
 }
@@ -528,15 +639,19 @@ function drawFeature(context: DrawContext, feature: Feature): void {
 }
 
 /**
- * A chimney stack. It rises from the roof, not from the ground, so it reads
- * as a detail on the roofline rather than a tower beside the house.
+ * A chimney stack. It is planted on the ridge and sunk into the roof, so it
+ * emerges from the slope with no gap under it and the roof's own silhouette
+ * cuts its foot — a detail on the roofline, not a post standing behind the
+ * house.
  */
 function drawChimney(context: DrawContext, width: number, color: string, smoking = false): void {
-  const { ctx, corners, wallHeight, roofHeight, variant } = context;
-  const anchor = lerpPoint(corners[0], corners[1], 0.34 + (variant % 2) * 0.3);
-  // The stack emerges partway up the roof slope and clears the ridge a little.
-  const base = anchor.y - wallHeight - roofHeight * 0.25;
-  const stackTop = anchor.y - wallHeight - roofHeight * (smoking ? 1.9 : 1.15);
+  const { ctx, roofHeight, variant } = context;
+  const mount = roofMount(context, 0.32 + (variant % 2) * 0.26);
+  const anchor = mount.anchor;
+  const base = anchor.y + mount.sink;
+  // How far the stack stands proud of the roof it came out of.
+  const clearance = smoking ? Math.max(15, roofHeight * 0.9) : Math.max(10, roofHeight * 0.6);
+  const stackTop = anchor.y - clearance;
   const colors = {
     left: light(color, 'left'),
     right: light(color, 'right'),
@@ -545,6 +660,8 @@ function drawChimney(context: DrawContext, width: number, color: string, smoking
   const half = width / 2;
   const skew = width * 0.3;
 
+  ctx.save();
+  if (mount.cut) clipAboveRoofline(ctx, mount.cut);
   fillFace(ctx, [
     { x: anchor.x - half, y: stackTop },
     { x: anchor.x, y: stackTop + skew },
@@ -563,6 +680,7 @@ function drawChimney(context: DrawContext, width: number, color: string, smoking
     { x: anchor.x + half, y: stackTop },
     { x: anchor.x, y: stackTop + skew },
   ], colors.top);
+  ctx.restore();
 
   if (smoking) {
     ctx.fillStyle = 'rgba(210, 205, 196, 0.42)';

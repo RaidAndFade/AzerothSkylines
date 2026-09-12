@@ -15,6 +15,15 @@ import {
 import { PALETTE, ROOF_SETS, hexToRgb, mix, rgbToHex, shade, withAlpha } from '@/render/palette';
 import { Camera, MAX_ZOOM, MIN_ZOOM } from '@/render/camera';
 import { buildingDepth, directionOf, sampleElevation, scatterDepth } from '@/render/renderer';
+import {
+  expand,
+  footprintCorners,
+  gableRidge,
+  hipApex,
+  leftToRight,
+  midpoint,
+  raise,
+} from '@/render/shapes';
 import { makeFlatCity } from './helpers';
 import { tileIndex } from '@/sim/city';
 
@@ -290,6 +299,58 @@ describe('agent facing', () => {
       const direction = directionOf(angle);
       expect(direction).toBeGreaterThanOrEqual(0);
       expect(direction).toBeLessThan(4);
+    }
+  });
+});
+
+describe('roof geometry', () => {
+  // The plate a roof is built on: a 2x2 footprint with 30px walls.
+  const top = raise(footprintCorners(2, 2), 30);
+  const roofHeight = 18;
+  const overhang = 5;
+
+  it('runs a gable ridge between the midpoints of the edges it spans', () => {
+    const [north, east, south, west] = expand(top, overhang);
+    const along = gableRidge(top, roofHeight, 0, overhang);
+    expect(along.start.x).toBeCloseTo(midpoint(north, west).x, 6);
+    expect(along.start.y).toBeCloseTo(midpoint(north, west).y - roofHeight, 6);
+    expect(along.end.x).toBeCloseTo(midpoint(east, south).x, 6);
+
+    const across = gableRidge(top, roofHeight, 1, overhang);
+    expect(across.start.x).toBeCloseTo(midpoint(north, east).x, 6);
+    expect(across.end.x).toBeCloseTo(midpoint(west, south).x, 6);
+  });
+
+  it('keeps the ridge above every eave, so a stack planted on it clears the roof', () => {
+    const eaves = expand(top, overhang);
+    for (const axis of [0, 1] as const) {
+      const { start, end } = gableRidge(top, roofHeight, axis, overhang);
+      for (const eave of eaves) {
+        expect(start.y).toBeLessThan(eave.y);
+        expect(end.y).toBeLessThan(eave.y);
+      }
+    }
+  });
+
+  it('puts a hip roof apex over the centre of the eaves', () => {
+    const eaves = expand(top, overhang);
+    const apex = hipApex(top, roofHeight, overhang);
+    expect(apex.x).toBeCloseTo((eaves[1].x + eaves[3].x) / 2, 6);
+    expect(apex.y).toBeCloseTo((eaves[0].y + eaves[2].y) / 2 - roofHeight, 6);
+    for (const eave of eaves) expect(apex.y).toBeLessThan(eave.y);
+  });
+
+  it('orders a roofline left to right, whichever way the ridge runs', () => {
+    const eaves = expand(top, overhang);
+    for (const axis of [0, 1] as const) {
+      const { start, end } = gableRidge(top, roofHeight, axis, overhang);
+      const line = leftToRight([eaves[3], start, end, eaves[1]]);
+      for (let i = 1; i < line.length; i++) {
+        expect(line[i].x).toBeGreaterThanOrEqual(line[i - 1].x);
+      }
+      // The ends of the line are the eaves; the ridge is what sits between.
+      expect(line[0]).toBe(eaves[3]);
+      expect(line[3]).toBe(eaves[1]);
     }
   });
 });
