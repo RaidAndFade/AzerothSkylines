@@ -321,13 +321,19 @@ describe('roof geometry', () => {
     expect(across.end.x).toBeCloseTo(midpoint(west, south).x, 6);
   });
 
-  it('keeps the ridge above every eave, so a stack planted on it clears the roof', () => {
-    const eaves = expand(top, overhang);
+  it('peaks a gable over the middle of the roof, whichever way the ridge runs', () => {
+    // A stack stands on the ridge, so the ridge has to be over the house
+    // rather than out on an edge: its middle is the very point a hip roof
+    // of the same pitch peaks at.
+    const [, east, , west] = expand(top, overhang);
+    const apex = hipApex(top, roofHeight, overhang);
     for (const axis of [0, 1] as const) {
       const { start, end } = gableRidge(top, roofHeight, axis, overhang);
-      for (const eave of eaves) {
-        expect(start.y).toBeLessThan(eave.y);
-        expect(end.y).toBeLessThan(eave.y);
+      expect(midpoint(start, end).x).toBeCloseTo(apex.x, 6);
+      expect(midpoint(start, end).y).toBeCloseTo(apex.y, 6);
+      for (const point of [start, end]) {
+        expect(point.x).toBeGreaterThan(west.x);
+        expect(point.x).toBeLessThan(east.x);
       }
     }
   });
@@ -337,7 +343,8 @@ describe('roof geometry', () => {
     const apex = hipApex(top, roofHeight, overhang);
     expect(apex.x).toBeCloseTo((eaves[1].x + eaves[3].x) / 2, 6);
     expect(apex.y).toBeCloseTo((eaves[0].y + eaves[2].y) / 2 - roofHeight, 6);
-    for (const eave of eaves) expect(apex.y).toBeLessThan(eave.y);
+    // Above the near eave, so a stack mounted behind the peak still shows.
+    expect(apex.y).toBeLessThan(eaves[2].y);
   });
 
   it('orders a roofline left to right, whichever way the ridge runs', () => {
