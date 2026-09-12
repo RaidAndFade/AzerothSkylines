@@ -66,6 +66,9 @@ body {
   inset: 0;
   display: block;
   touch-action: none;
+  /* The input layer swaps this for crosshair and grabbing as the tool and
+     the gesture change; this is the resting state. */
+  cursor: grab;
 }
 
 /* --- shared surfaces ----------------------------------------------------- */

@@ -23,15 +23,17 @@ yourself with `npm install && npm run build`.
 
 | | |
 |---|---|
-| **Move the map** | One finger drag (or the mouse) while Inspect is selected; two fingers any time |
-| **Zoom** | Pinch, or the scroll wheel |
+| **Move the map** | One finger drag (or the mouse) while Inspect is selected; two fingers any time. With a mouse, the right or middle button drags whatever tool is held, and a two-finger trackpad scroll moves the map |
+| **Zoom** | Pinch, the scroll wheel, or `Ctrl`+scroll on a trackpad |
+| **Put the tool down** | Right click, or `Esc`. A second one closes the open panel |
 | **Draw a street** | Pick **Roads**, then drag. Streets are laid in an L from where the drag began |
 | **Footpaths** | Cheap, and the quickest way to walk — but no carts, and no water or drainage beneath them |
 | **Zone land** | Pick **Dwellings**, **Trade** or **Crafting**, then drag a rectangle beside a road |
 | **Build** | Pick **Build**, choose from the catalogue, then tap a plot fronting a road |
 | **Annex land** | Pick **Land**, tap a lot beyond the walls, and confirm the price |
 | **Clear ground** | Pick **Raze** and drag over what you want gone |
-| **Keyboard** | `WASD` scroll · `1`–`4` speed · `R` roads · `Z` zone · `X` raze · `Esc` put the tool down |
+| **Keyboard** | `WASD` scroll · `Q`/`E` zoom · `1`–`4` speed · `Tab` next panel · `Esc` back out |
+| **Tool keys** | `I` inspect · `R` roads · `Z` dwellings · `T` trade · `C` crafting · `B` build · `L` land · `X` raze |
 
 Your city is saved to the browser on this device every ninety game-days, and
 from the menu.

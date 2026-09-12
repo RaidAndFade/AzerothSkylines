@@ -41,6 +41,9 @@ import { wallStats } from '../sim/walls';
 
 export type PanelId = 'build' | 'budget' | 'city' | 'journal' | 'building' | 'land' | 'overlays' | 'menu' | 'guide';
 
+/** The panels Tab walks through, in the order the toolbar offers them. */
+const PANEL_CYCLE: PanelId[] = ['build', 'overlays', 'budget', 'journal', 'city', 'menu'];
+
 export interface HudCallbacks {
   onToolChange(tool: Partial<ToolState> & { kind: ToolKind }): void;
   onSpeedChange(speed: number): void;
@@ -52,6 +55,7 @@ export interface HudCallbacks {
   onSave(): void;
   onLoad(): void;
   onToggleZones(): void;
+  onToggleEdgeScroll(enabled: boolean): void;
   onFocusBuilding(building: Building): void;
 }
 
@@ -162,6 +166,7 @@ export class Hud {
   private currentTool: ToolState;
   private currentOverlay: Overlay = 'none';
   private showZones = true;
+  private edgeScroll = false;
 
   constructor(root: HTMLElement, tool: ToolState, callbacks: HudCallbacks) {
     this.root = root;
@@ -299,7 +304,8 @@ export class Hud {
 
   // --- tool selection -------------------------------------------------------
 
-  private selectTool(kind: ToolKind, extra?: Partial<ToolState>): void {
+  /** Pick a tool exactly as tapping its toolbar button would. */
+  selectTool(kind: ToolKind, extra?: Partial<ToolState>): void {
     this.currentTool = { ...this.currentTool, ...extra, kind };
     this.callbacks.onToolChange({ ...extra, kind });
     this.refreshToolButtons();
@@ -439,6 +445,16 @@ export class Hud {
   closePanel(): void {
     this.openPanel = null;
     this.panel.classList.remove('open');
+  }
+
+  get panelIsOpen(): boolean {
+    return this.openPanel !== null;
+  }
+
+  /** Tab: step to the next panel, starting from the first when none is open. */
+  cyclePanel(): void {
+    const index = this.openPanel === null ? -1 : PANEL_CYCLE.indexOf(this.openPanel);
+    this.togglePanel(PANEL_CYCLE[(index + 1) % PANEL_CYCLE.length], true);
   }
 
   selectBuilding(building: Building | null): void {
@@ -1021,8 +1037,23 @@ export class Hud {
         class: 'blurb',
         html:
           'One finger drags the map, or draws while a tool is held. Two fingers pinch to zoom and move.<br>' +
-          'On a keyboard: <b>WASD</b> to scroll, <b>scroll wheel</b> to zoom, <b>1-4</b> for speed, <b>Esc</b> to put a tool down.',
+          'With a mouse, the <b>right</b> or <b>middle</b> button drags the map whatever tool is held, and a ' +
+          '<b>right click</b> puts the tool down. A wheel notch zooms; a two-finger trackpad scroll moves the map, ' +
+          'and <b>Ctrl</b>+scroll or a pinch zooms.',
       }),
+      el('div', {
+        class: 'blurb',
+        html:
+          '<b>WASD</b> or the arrows scroll &middot; <b>Q</b>/<b>E</b> (or <b>[</b>/<b>]</b>) zoom &middot; ' +
+          '<b>1</b>-<b>4</b> speed &middot; <b>Tab</b> next panel &middot; <b>Esc</b> or right click backs out<br>' +
+          'Tools: <b>I</b> inspect &middot; <b>R</b> roads &middot; <b>Z</b> dwellings &middot; <b>T</b> trade &middot; ' +
+          '<b>C</b> crafting &middot; <b>B</b> build &middot; <b>L</b> land &middot; <b>X</b> raze',
+      }),
+      button(`chip ${this.edgeScroll ? 'active' : ''}`, () => {
+        this.edgeScroll = !this.edgeScroll;
+        this.callbacks.onToggleEdgeScroll(this.edgeScroll);
+        if (this.city) this.renderPanel(this.city);
+      }, this.edgeScroll ? 'Edge scrolling: on' : 'Edge scrolling: off'),
     ]);
   }
 
@@ -1050,6 +1081,12 @@ export class Hud {
 
   hideHint(): void {
     this.hint.classList.remove('show');
+  }
+
+  /** Reflect the edge-scroll setting the host restored from storage. */
+  setEdgeScroll(enabled: boolean): void {
+    this.edgeScroll = enabled;
+    if (this.city && this.openPanel === 'menu') this.renderPanel(this.city);
   }
 
   get zonesVisible(): boolean {
