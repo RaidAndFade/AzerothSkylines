@@ -78,7 +78,7 @@ open ground, and a level corridor is cut and filled along it.
 | `sim/trade` | Production, haulage between buildings, hub reserves, import and export |
 | `sim/population` | Who lives where, who works where, and how content they are |
 | `sim/demand` | The three demand bars, driven by contentment, vacancies and unfilled posts |
-| `sim/economy` | Monthly taxes and upkeep |
+| `sim/economy` | Monthly taxes and upkeep, the month in progress projected, the ledger of closed months, Crown loans, and what stops working while the city is in debt |
 | `sim/walls` | The curtain wall, derived from the land you hold |
 | `sim/agents` | Villagers, carts, guards and travellers. Carts keep to the streets; people on foot take the paths |
 

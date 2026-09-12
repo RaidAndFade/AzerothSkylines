@@ -197,10 +197,17 @@ export function isProtected(city: CityState, x: number, y: number): boolean {
 
 /** Count of standing wall pieces, for the HUD and upkeep. */
 export function wallStats(city: CityState): { walls: number; towers: number; gates: number } {
+  return countSegments(city.walls);
+}
+
+/** The same tally over any stretch of wall, standing or merely planned. */
+export function countSegments(
+  segments: readonly WallSegment[],
+): { walls: number; towers: number; gates: number } {
   let walls = 0;
   let towers = 0;
   let gates = 0;
-  for (const segment of city.walls) {
+  for (const segment of segments) {
     if (segment.kind === 'gate') gates++;
     else if (segment.kind === 'tower') towers++;
     else walls++;
