@@ -44,6 +44,13 @@ export type PanelId = 'build' | 'budget' | 'city' | 'journal' | 'building' | 'la
 /** The panels Tab walks through, in the order the toolbar offers them. */
 const PANEL_CYCLE: PanelId[] = ['build', 'overlays', 'budget', 'journal', 'city', 'menu'];
 
+/**
+ * Panels showing figures that move as the city runs, and so are redrawn as it
+ * does. The rest — the views, the menu, the guide — are drawn once when they
+ * open and again only when something on them is pressed.
+ */
+const LIVE_PANELS: readonly PanelId[] = ['build', 'budget', 'city', 'journal', 'building', 'land'];
+
 export interface HudCallbacks {
   onToolChange(tool: Partial<ToolState> & { kind: ToolKind }): void;
   onSpeedChange(speed: number): void;
@@ -398,7 +405,7 @@ export class Hud {
 
   /** Redraw the open panel, but only once something on it has changed. */
   private refreshPanel(city: CityState): void {
-    if (!this.openPanel) return;
+    if (!this.openPanel || !LIVE_PANELS.includes(this.openPanel)) return;
     if (this.panelState(city) === this.panelSignature) return;
     if (this.panelHeld || Date.now() < this.panelSettlesAt) return;
     this.renderPanel(city);
