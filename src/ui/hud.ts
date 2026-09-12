@@ -14,7 +14,14 @@ import {
   SERVICE_LABELS,
   Zone,
 } from '../sim/types';
-import { CityState, ROAD_NAMES, buildingCenter, tileIndex } from '../sim/city';
+import {
+  CityState,
+  ROAD_NAMES,
+  buildingCenter,
+  markJournalRead,
+  tileIndex,
+  unreadJournalCount,
+} from '../sim/city';
 import { PLACEABLE_DEFS, getDef } from '../data/buildings';
 import { ToolKind, ToolState, toolHint } from './tools';
 import { Overlay } from '../render/renderer';
@@ -67,6 +74,11 @@ function plural(count: number, noun: string): string {
   return `${count} ${noun}${count === 1 ? '' : 's'}`;
 }
 
+/** "Bloomrise 24", the calendar the rest of the HUD shows. */
+function monthAndYear(month: number, year: number): string {
+  return `${MONTH_NAMES[(month - 1) % 12]} ${year}`;
+}
+
 export class Hud {
   readonly root: HTMLElement;
   private readonly callbacks: HudCallbacks;
@@ -94,9 +106,13 @@ export class Hud {
   private readonly toast: HTMLElement;
   private readonly hint: HTMLElement;
 
+  /** Unread-bad-news marker on the Chronicle button; hidden when empty. */
+  private readonly journalBadge = el('span', { class: 'badge', hidden: true });
+
   private openPanel: PanelId | null = null;
   private toastTimer = 0;
   private lastJournalLength = -1;
+  private lastUnreadBad = -1;
   private selectedBuilding: Building | null = null;
   private landSelection: { px: number; py: number } | null = null;
   private currentTool: ToolState;
@@ -217,6 +233,7 @@ export class Hud {
         () => this.togglePanel('journal'),
         el('span', { class: 'glyph', text: '\u{1F4D6}' }),
         el('span', { text: 'Chronicle' }),
+        this.journalBadge,
       ),
     );
     return bar;
@@ -270,7 +287,7 @@ export class Hud {
 
     this.stats.population.textContent = compact(city.stats.population);
     this.stats.happiness.textContent = percent(city.stats.happiness);
-    this.stats.date.textContent = `${MONTH_NAMES[(city.clock.month - 1) % 12]} ${city.clock.year}`;
+    this.stats.date.textContent = monthAndYear(city.clock.month, city.clock.year);
 
     this.demandBars.residential.style.height = `${city.demand.residential * 100}%`;
     this.demandBars.commercial.style.height = `${city.demand.commercial * 100}%`;
@@ -282,6 +299,15 @@ export class Hud {
     if (city.journal.length !== this.lastJournalLength) {
       this.lastJournalLength = city.journal.length;
       if (this.openPanel === 'journal') this.renderPanel(city);
+    }
+
+    // Badge the Chronicle with unread bad news, so something going wrong is
+    // visible without opening the panel to look for it.
+    const unread = this.openPanel === 'journal' ? 0 : unreadJournalCount(city, 'bad');
+    if (unread !== this.lastUnreadBad) {
+      this.lastUnreadBad = unread;
+      this.journalBadge.textContent = unread > 9 ? '9+' : String(unread);
+      this.journalBadge.hidden = unread === 0;
     }
   }
 
@@ -543,19 +569,21 @@ export class Hud {
   private renderJournal(city: CityState, body: HTMLElement): void {
     const list = el('div', { class: 'journal' });
     for (const entry of city.journal) {
-      list.appendChild(
-        el(
-          'div',
-          { class: `journal-entry ${entry.tone}` },
-          el('span', { class: 'when', text: `Day ${entry.day}` }),
-          entry.text,
-        ),
+      const row = el(
+        'div',
+        { class: `journal-entry ${entry.tone}${entry.unread ? ' unread' : ''}` },
+        el('span', { class: 'when', text: monthAndYear(entry.month, entry.year) }),
+        entry.text,
       );
+      row.title = `Day ${entry.day}`;
+      list.appendChild(row);
     }
     if (city.journal.length === 0) {
       list.appendChild(el('div', { class: 'journal-entry', text: 'Nothing of note has happened yet.' }));
     }
     body.appendChild(list);
+    // Rendered is read: the badge clears as soon as the player looks.
+    markJournalRead(city);
   }
 
   private renderBuilding(city: CityState, body: HTMLElement): void {
