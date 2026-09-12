@@ -6,8 +6,9 @@
  * run-length encoded, which keeps a large city comfortably inside the size
  * a browser will hold in local storage.
  */
-import { Agent, Building, Budget, Demand, GameClock, Good } from './types';
-import { CityState, createCity, emptyStats, registerBuilding } from './city';
+import { Agent, Building, BuildingKind, Budget, Demand, GameClock, Good } from './types';
+import { CityState, JournalEntry, createCity, emptyStats, registerBuilding } from './city';
+import { DAYS_PER_MONTH, MONTHS_PER_YEAR } from './economy';
 import { rebuildWalls } from './walls';
 import { Rng } from '../core/rng';
 
@@ -29,6 +30,10 @@ export interface SaveData {
   demand: Demand;
   reserves: Record<Good, number>;
   journal: CityState['journal'];
+  /** Day each standing grievance was last raised; absent in older saves. */
+  complaints?: Record<string, number>;
+  /** Population high-water mark for announcements; absent in older saves. */
+  announcedPopulation?: number;
   rngState: number;
 }
 
@@ -77,6 +82,8 @@ export function serializeCity(city: CityState): SaveData {
     demand: { ...city.demand },
     reserves: { ...city.reserves },
     journal: [...city.journal],
+    complaints: { ...city.complaints },
+    announcedPopulation: city.announcedPopulation,
     rngState: city.rng.serialize(),
   };
 }
@@ -112,7 +119,18 @@ export function deserializeCity(data: SaveData): CityState {
   Object.assign(city.clock, data.clock);
   Object.assign(city.demand, data.demand);
   Object.assign(city.reserves, data.reserves);
-  city.journal = [...data.journal];
+  city.journal = (data.journal ?? []).map((entry) => ({
+    ...entry,
+    // Entries in a save written before they carried a date have only the day
+    // count; the calendar is a pure function of it, so fill it back in.
+    ...(entry.month === undefined ? dateOf(data.clock, entry.day) : {}),
+    unread: entry.unread ?? false,
+  }));
+  city.complaints = { ...data.complaints };
+  // A save written before progress was tracked carries no high-water mark.
+  // Derive one from the city as saved, so everything it has already grown
+  // past is treated as announced rather than announced again on load.
+  city.announcedPopulation = data.announcedPopulation ?? housedPopulation(data.buildings);
   city.stats = emptyStats();
   city.agents = [] as Agent[];
   city.nextAgentId = 1;
@@ -125,6 +143,37 @@ export function deserializeCity(data: SaveData): CityState {
   // Everything derived is recomputed on the first simulated day.
   city.dirtyTiles.clear();
   return city;
+}
+
+/**
+ * The calendar date a given elapsed-day count falls on, worked out backwards
+ * from a clock whose date is known. Epoch-free, so it stays correct whatever
+ * year a city is founded in.
+ */
+function dateOf(clock: GameClock, totalDays: number): Pick<JournalEntry, 'dayOfMonth' | 'month' | 'year'> {
+  const daysPerYear = DAYS_PER_MONTH * MONTHS_PER_YEAR;
+  const now = clock.year * daysPerYear + (clock.month - 1) * DAYS_PER_MONTH + (clock.day - 1);
+  const then = Math.max(0, now - (clock.totalDays - totalDays));
+  return {
+    dayOfMonth: (then % DAYS_PER_MONTH) + 1,
+    month: (Math.floor(then / DAYS_PER_MONTH) % MONTHS_PER_YEAR) + 1,
+    year: Math.floor(then / daysPerYear),
+  };
+}
+
+/**
+ * The people a saved city holds, without simulating it first. Counted the
+ * same way `updatePopulation` counts them — dwellings only, and the folk
+ * still in a derelict house included — so the mark this derives cannot come
+ * out under the population the first simulated day reports and announce a
+ * milestone the city passed long ago.
+ */
+function housedPopulation(buildings: readonly Building[]): number {
+  let total = 0;
+  for (const building of buildings) {
+    if (building.kind === BuildingKind.Dwelling) total += building.residents;
+  }
+  return total;
 }
 
 export interface StorageLike {

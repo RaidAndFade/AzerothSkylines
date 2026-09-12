@@ -16,8 +16,16 @@
     "type": "git",
     "url": "git+https://github.com/RaidAndFade/AzerothSkylines.git"
   },
-  "keywords": [],
-  "author": "",
+  "keywords": [
+    "game",
+    "city-builder",
+    "warcraft",
+    "isometric",
+    "canvas",
+    "typescript",
+    "single-file"
+  ],
+  "author": "RaidAndFade",
   "license": "MIT",
   "bugs": {
     "url": "https://github.com/RaidAndFade/AzerothSkylines/issues"
