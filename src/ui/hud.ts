@@ -92,7 +92,7 @@ const OVERLAYS: { id: Overlay; label: string }[] = [
 ];
 
 /** How long after a press the panel waits before it may redraw itself. */
-const PANEL_SETTLE_MS = 250;
+export const PANEL_SETTLE_MS = 250;
 
 /** "1 gate", "3 gates" — small thing, but the HUD is read constantly. */
 function plural(count: number, noun: string): string {
