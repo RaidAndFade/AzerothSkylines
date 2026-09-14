@@ -12,6 +12,8 @@ import {
   cone,
   lathe,
   point,
+  ridgeHalfLength,
+  ridgeRunsAlongX,
   ridgedRoof,
   spheroid,
   tone,
@@ -29,6 +31,8 @@ import {
   surfaceNormal,
   tileHeight,
 } from '@/sim/terrain';
+import { addBuilding } from '@/render/buildingMesh';
+import { styleFor } from '@/data/styles';
 import { makeFlatCity } from './helpers';
 import { tileIndex } from '@/sim/city';
 
@@ -432,4 +436,157 @@ function ridgeLength(mesh: MeshBuilder): number {
     max = Math.max(max, data[i]);
   }
   return max - min;
+}
+
+/**
+ * The guarantees a roof makes to whatever stands on it.
+ *
+ * These began as screen-space assertions over the isometric roof, where two
+ * of them had to be weakened: screen y conflates height with depth, so the
+ * far eave of a wide house sits higher up the screen than the ridge above
+ * it, and "the ridge is above every eave" could not be stated. In world
+ * space it can be, because height is its own axis — so it is stated here.
+ */
+describe('roof geometry', () => {
+  const width = 2.4;
+  const depth = 1.6;
+  const eaveY = 3;
+  const roofHeight = 0.9;
+  const overhang = 0.12;
+
+  const roof = (hip: number): MeshBuilder => {
+    const mesh = new MeshBuilder();
+    ridgedRoof(mesh, 0, eaveY, 0, width, depth, roofHeight, hip, colour(PALETTE.thatch), { overhang });
+    return mesh;
+  };
+
+  it('runs the ridge along the long axis, where a roof drains across the short one', () => {
+    expect(ridgeRunsAlongX(2.4, 1.6)).toBe(true);
+    expect(ridgeRunsAlongX(1.6, 2.4)).toBe(false);
+    // A square plan has to pick one, and must pick the same one every time.
+    expect(ridgeRunsAlongX(2, 2)).toBe(ridgeRunsAlongX(2, 2));
+  });
+
+  it('peaks a gable over the middle of the roof, whichever way the ridge runs', () => {
+    for (const [w, d] of [[width, depth], [depth, width]]) {
+      const mesh = new MeshBuilder();
+      ridgedRoof(mesh, 0, eaveY, 0, w, d, roofHeight, 0, colour(PALETTE.thatch), { overhang });
+      const ridge = ridgeOf(mesh);
+      // The middle of a gable ridge is the point a hip of the same pitch
+      // peaks at: both are the centre of the roof, at the same height.
+      expect(ridge.centreX).toBeCloseTo(0, 6);
+      expect(ridge.centreZ).toBeCloseTo(0, 6);
+      expect(ridge.y).toBeCloseTo(eaveY + roofHeight, 6);
+    }
+  });
+
+  it('pulls a hip ridge in to a point at the same peak', () => {
+    const gable = ridgeOf(roof(0));
+    const hip = ridgeOf(roof(1));
+    expect(hip.length).toBeLessThan(gable.length);
+    expect(hip.length).toBeLessThan(0.2);
+    expect(hip.centreX).toBeCloseTo(gable.centreX, 6);
+    expect(hip.y).toBeCloseTo(gable.y, 6);
+  });
+
+  it('keeps the ridge inside the eaves, so a stack planted on it is over the house', () => {
+    for (const hip of [0, 0.34, 1]) {
+      const mesh = roof(hip);
+      const ridge = ridgeOf(mesh);
+      expect(ridge.minX).toBeGreaterThan(mesh.minX);
+      expect(ridge.maxX).toBeLessThan(mesh.maxX);
+      expect(ridge.minZ).toBeGreaterThan(mesh.minZ);
+      expect(ridge.maxZ).toBeLessThan(mesh.maxZ);
+    }
+  });
+
+  it('keeps the ridge above every eave — which world space can say and a screen cannot', () => {
+    for (const hip of [0, 0.34, 1]) {
+      const mesh = roof(hip);
+      expect(ridgeOf(mesh).y).toBeGreaterThan(mesh.minY + roofHeight - 1e-6);
+      expect(mesh.minY).toBeCloseTo(eaveY - 0.001, 2);
+    }
+  });
+
+  it('oversails the eaves past the plan it covers', () => {
+    const mesh = roof(0);
+    expect(mesh.maxX).toBeCloseTo(width / 2 + overhang, 5);
+    expect(mesh.maxZ).toBeCloseTo(depth / 2 + overhang, 5);
+  });
+});
+
+describe('what stands on a roof', () => {
+  /**
+   * A chimney used to be anchored over the eave with a gap beneath it that
+   * nothing filled. The fix is the same in three dimensions as it was in
+   * two: put the stack on the ridge, and found it below the roof surface.
+   */
+  it('stands a stack on the ridge and founds it below the eaves', () => {
+    for (const defId of ['house2', 'house3', 'inn', 'craft2']) {
+      const plain = new MeshBuilder();
+      addBuilding(plain, null, placement(defId), { floor: 0, base: 0 });
+      const style = styleFor(defId);
+      const eaves = style.wallHeight + 0.12;
+
+      // The stack clears the ridge, so it reads against the sky...
+      expect(plain.maxY, defId).toBeGreaterThan(eaves + style.roofHeight);
+      // ...and there is masonry below the eaves for the roof to meet.
+      expect(plain.minY, defId).toBeLessThan(eaves);
+    }
+  });
+
+  it('finds the ridge with the same helper the roof is built from', () => {
+    // The roof and the stack agreeing is the whole fix: worked out twice,
+    // they drift, and the stack ends up in mid-air.
+    for (const [w, d] of [[2.4, 1.6], [1.6, 2.4], [2, 2]]) {
+      const half = ridgeHalfLength(w, d, 0);
+      const mesh = new MeshBuilder();
+      ridgedRoof(mesh, 0, 0, 0, w, d, 0.8, 0, colour(PALETTE.thatch), { overhang: 0 });
+      const ridge = ridgeOf(mesh);
+      const measured = ridgeRunsAlongX(w, d) ? ridge.maxX : ridge.maxZ;
+      expect(measured).toBeCloseTo(half, 5);
+    }
+  });
+});
+
+/** The ridge of a roof mesh: its topmost vertices, and how far they run. */
+function ridgeOf(mesh: MeshBuilder): {
+  y: number;
+  length: number;
+  minX: number;
+  maxX: number;
+  minZ: number;
+  maxZ: number;
+  centreX: number;
+  centreZ: number;
+} {
+  const data = mesh.vertexData();
+  let top = -Infinity;
+  for (let i = 0; i < data.length; i += 10) top = Math.max(top, data[i + 1]);
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let minZ = Infinity;
+  let maxZ = -Infinity;
+  for (let i = 0; i < data.length; i += 10) {
+    if (data[i + 1] < top - 1e-4) continue;
+    minX = Math.min(minX, data[i]);
+    maxX = Math.max(maxX, data[i]);
+    minZ = Math.min(minZ, data[i + 2]);
+    maxZ = Math.max(maxZ, data[i + 2]);
+  }
+  return {
+    y: top,
+    length: Math.max(maxX - minX, maxZ - minZ),
+    minX,
+    maxX,
+    minZ,
+    maxZ,
+    centreX: (minX + maxX) / 2,
+    centreZ: (minZ + maxZ) / 2,
+  };
+}
+
+/** A one-tile plot for a catalogue entry, on level ground. */
+function placement(defId: string) {
+  return { x: 0, y: 0, width: 2, height: 2, defId, variant: 0, facing: 2, abandoned: false };
 }

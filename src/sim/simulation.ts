@@ -18,7 +18,7 @@ import { runTrade } from './trade';
 import { advanceCalendar, settleMonth } from './economy';
 import { TrafficQueue, maintainAgents, spawnDeliveryCarts, updateAgents } from './agents';
 import { rebuildWalls } from './walls';
-import { getDef } from '../data/buildings';
+import { PLACEABLE_DEFS, getDef } from '../data/buildings';
 
 /** Real seconds one game-day takes at normal speed. */
 export const SECONDS_PER_DAY = 2.4;
@@ -120,10 +120,15 @@ export class Simulation {
     const { newMonth } = advanceCalendar(city);
     if (newMonth) settleMonth(city);
 
+    // Milestones and unlocks are checked daily: the player should hear that
+    // the inn is available on the day the city grows into it, not up to ten
+    // days later. It costs nothing while the city is not growing.
+    announceProgress(city);
+
     this.milestoneAccumulator++;
     if (this.milestoneAccumulator >= 10) {
       this.milestoneAccumulator = 0;
-      checkMilestones(city);
+      reviewComplaints(city);
     }
   }
 }
@@ -225,39 +230,133 @@ const MILESTONES: { population: number; title: string }[] = [
   { population: 5000, title: 'Jewel of Elwynn' },
 ];
 
-const reached = new WeakMap<CityState, Set<number>>();
+/** The catalogue entries gated on population, in the order they open up. */
+const UNLOCKABLE_DEFS: readonly { population: number; name: string }[] = PLACEABLE_DEFS
+  .filter((def) => def.unlockPopulation !== undefined)
+  .map((def) => ({ population: def.unlockPopulation as number, name: def.name }))
+  .sort((a, b) => a.population - b.population);
 
-export function checkMilestones(city: CityState): void {
-  let seen = reached.get(city);
-  if (!seen) {
-    seen = new Set();
-    reached.set(city, seen);
-  }
+/**
+ * Milestones and unlocks, announced once each.
+ *
+ * Both are keyed off a high-water mark of population kept on the city, which
+ * is saved: a city reloaded at twelve hundred souls does not re-announce the
+ * four milestones it passed on the way up. A population that falls and climbs
+ * again does not re-announce either — the city has already been a Village.
+ */
+export function announceProgress(city: CityState): void {
+  const population = city.stats.population;
+  const mark = city.announcedPopulation;
+  if (population <= mark) return;
+
   for (const milestone of MILESTONES) {
-    if (city.stats.population >= milestone.population && !seen.has(milestone.population)) {
-      seen.add(milestone.population);
+    if (milestone.population > mark && population >= milestone.population) {
       logEvent(city, `The settlement is now a ${milestone.title}.`, 'good');
     }
   }
-
-  // Warn about the most pressing shortage, once in a while.
-  const worst = worstService(city);
-  if (worst && city.stats.population > 40) {
-    logEvent(city, worst, 'bad');
+  for (const unlock of UNLOCKABLE_DEFS) {
+    if (unlock.population > mark && population >= unlock.population) {
+      logEvent(city, `${unlock.name} may now be built.`, 'good');
+    }
   }
+  city.announcedPopulation = population;
 }
 
-function worstService(city: CityState): string | null {
-  const complaints: { score: number; text: string }[] = [];
-  const s = city.stats.services;
-  if (s[Service.Water] < 0.55) complaints.push({ score: s[Service.Water], text: 'Half the city hauls its own water. Sink more wells.' });
-  if (s[Service.Sewage] < 0.45) complaints.push({ score: s[Service.Sewage], text: 'Filth runs in the streets — the city needs drainage.' });
-  if (s[Service.Safety] < 0.4) complaints.push({ score: s[Service.Safety], text: 'Folk fear the night. Post more of the guard.' });
-  if (s[Service.Commerce] < 0.4) complaints.push({ score: s[Service.Commerce], text: 'There is nowhere to buy bread. Zone for trade.' });
-  if (city.stats.unemployment > 0.25) complaints.push({ score: 1 - city.stats.unemployment, text: 'Too many idle hands. The city needs work.' });
-  if (complaints.length === 0) return null;
-  complaints.sort((a, b) => a.score - b.score);
-  return complaints[0].text;
+/** Days before an unresolved grievance is raised again: one season. */
+export const COMPLAINT_REPEAT_DAYS = 90;
+/** Below this many people the city is too small to have civic complaints. */
+export const COMPLAINT_MIN_POPULATION = 40;
+/**
+ * How far a score must rise past the threshold that raised it before the
+ * grievance counts as settled. Without it a service sitting exactly on its
+ * threshold would alternate between complaint and relief forever.
+ */
+const COMPLAINT_HYSTERESIS = 0.08;
+
+interface ComplaintDef {
+  key: string;
+  /** The measure this grievance watches; low is bad. */
+  score(city: CityState): number;
+  /** Raised when the score falls below this. */
+  at: number;
+  text: string;
+  cleared: string;
+}
+
+const COMPLAINTS: readonly ComplaintDef[] = [
+  {
+    key: 'water',
+    score: (city) => city.stats.services[Service.Water],
+    at: 0.55,
+    text: 'Half the city hauls its own water. Sink more wells.',
+    cleared: 'Every quarter now draws clean water.',
+  },
+  {
+    key: 'sewage',
+    score: (city) => city.stats.services[Service.Sewage],
+    at: 0.45,
+    text: 'Filth runs in the streets — the city needs drainage.',
+    cleared: 'The streets run clean again.',
+  },
+  {
+    key: 'safety',
+    score: (city) => city.stats.services[Service.Safety],
+    at: 0.4,
+    text: 'Folk fear the night. Post more of the guard.',
+    cleared: 'The guard walks its rounds; the city sleeps easy.',
+  },
+  {
+    key: 'commerce',
+    score: (city) => city.stats.services[Service.Commerce],
+    at: 0.4,
+    text: 'There is nowhere to buy bread. Zone for trade.',
+    cleared: 'There are shops enough to feed the city.',
+  },
+  {
+    key: 'work',
+    score: (city) => 1 - city.stats.unemployment,
+    at: 0.75,
+    text: 'Too many idle hands. The city needs work.',
+    cleared: 'The idle have found work.',
+  },
+];
+
+/**
+ * Raise the most pressing shortage, and say so when one is put right.
+ *
+ * Only the worst standing grievance is raised at a time, and never one that
+ * was already raised within the last season, so a shortage that persists for
+ * a year costs the Chronicle a handful of lines rather than three dozen.
+ */
+export function reviewComplaints(city: CityState): void {
+  const day = city.clock.totalDays;
+  const raised = city.complaints;
+
+  // Anything comfortably better than the threshold that raised it is settled.
+  for (const complaint of COMPLAINTS) {
+    if (raised[complaint.key] === undefined) continue;
+    if (complaint.score(city) < complaint.at + COMPLAINT_HYSTERESIS) continue;
+    delete raised[complaint.key];
+    logEvent(city, complaint.cleared, 'good');
+  }
+
+  if (city.stats.population <= COMPLAINT_MIN_POPULATION) return;
+
+  const standing = COMPLAINTS.filter((complaint) => complaint.score(city) < complaint.at);
+  if (standing.length === 0) return;
+  standing.sort((a, b) => a.score(city) - a.at - (b.score(city) - b.at));
+
+  const worst = standing[0];
+  const lastRaised = raised[worst.key];
+  if (lastRaised !== undefined && day - lastRaised < COMPLAINT_REPEAT_DAYS) return;
+  raised[worst.key] = day;
+  logEvent(city, worst.text, 'bad');
+}
+
+/** The periodic review of the city: what it has become, and what it lacks. */
+export function checkMilestones(city: CityState): void {
+  announceProgress(city);
+  reviewComplaints(city);
 }
 
 /** Reset derived fields, e.g. after loading a save. */

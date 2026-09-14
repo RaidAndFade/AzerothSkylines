@@ -33,16 +33,18 @@ yourself with `npm install && npm run build`.
 
 | | |
 |---|---|
-| **Move the map** | One finger drag (or the mouse) while Inspect is selected; two fingers any time |
-| **Zoom** | Pinch, or the scroll wheel. Coming in drops the view toward the street; pulling back lifts it over the district |
-| **Turn and tilt** | Drag with the right or middle button, or twist with two fingers. `Q` and `E` turn a step at a time |
+| **Move the map** | One finger drag (or the mouse) while Inspect is selected; two fingers any time. With a mouse, the right button drags whatever tool is held, and a two-finger trackpad scroll moves the map |
+| **Zoom** | Pinch, the scroll wheel, or `Ctrl`+scroll on a trackpad. Coming in drops the view toward the street; pulling back lifts it over the district |
+| **Turn and tilt** | Drag with the middle button, or twist with two fingers. `Q` and `E` turn a step at a time |
+| **Put the tool down** | Right click, or `Esc`. A second one closes the open panel |
 | **Draw a street** | Pick **Roads**, then drag. Streets are laid in an L from where the drag began |
 | **Footpaths** | Cheap, and the quickest way to walk — but no carts, and no water or drainage beneath them |
 | **Zone land** | Pick **Dwellings**, **Trade** or **Crafting**, then drag a rectangle beside a road |
 | **Build** | Pick **Build**, choose from the catalogue, then tap a plot fronting a road |
 | **Annex land** | Pick **Land**, tap a lot beyond the walls, and confirm the price |
 | **Clear ground** | Pick **Raze** and drag over what you want gone |
-| **Keyboard** | `WASD` scroll · `Q`/`E` turn · `1`–`4` speed · `R` roads · `Z` zone · `X` raze · `Esc` put the tool down |
+| **Keyboard** | `WASD` scroll · `Q`/`E` turn · `[`/`]` zoom · `1`–`4` speed · `Tab` next panel · `Esc` back out |
+| **Tool keys** | `I` inspect · `R` roads · `Z` dwellings · `T` trade · `C` crafting · `B` build · `L` land · `X` raze |
 
 Your city is saved to the browser on this device every ninety game-days, and
 from the menu.
@@ -107,7 +109,7 @@ open ground, and a level corridor is cut and filled along it.
 | `sim/trade` | Production, haulage between buildings, hub reserves, import and export |
 | `sim/population` | Who lives where, who works where, and how content they are |
 | `sim/demand` | The three demand bars, driven by contentment, vacancies and unfilled posts |
-| `sim/economy` | Monthly taxes and upkeep |
+| `sim/economy` | Monthly taxes and upkeep, the month in progress projected, the ledger of closed months, Crown loans, and what stops working while the city is in debt |
 | `sim/walls` | The curtain wall, derived from the land you hold |
 | `sim/agents` | Villagers, carts, guards and travellers. Carts keep to the streets; people on foot take the paths |
 
@@ -190,12 +192,17 @@ playthrough, panel screenshots and a frame-pacing measurement. See
 
 ### Tests
 
-361 tests cover each simulation system and the pure parts of the renderer —
-the ground surface, the camera, the geometry kit — plus two end-to-end runs:
-one that
+The suite covers each simulation system and the pure parts of the renderer —
+the ground surface, the camera, the geometry kit, what a wheel event means —
+plus two end-to-end runs: one that
 lays out a town, gives it water, drainage and a guard, and checks it grows
 past five hundred residents, employs them, supplies its shops and pays its
 own way; and one that neglects a town and checks it empties out.
+
+The runner owns this. It runs the suite on every push and pull request, and
+the deploy is gated on the result, so that run is the authority rather than
+anything reproduced by hand. The commands are here for when you want to sit
+with one particular test:
 
 ```
 npm test
@@ -234,5 +241,5 @@ Sources consulted for the setting:
 
 ## Licence
 
-MIT. Warcraft, Azeroth, Stormwind and Elwynn Forest are trademarks of
-Blizzard Entertainment; this is an unaffiliated fan project.
+MIT — see [LICENSE](LICENSE). Warcraft, Azeroth, Stormwind and Elwynn Forest
+are trademarks of Blizzard Entertainment; this is an unaffiliated fan project.

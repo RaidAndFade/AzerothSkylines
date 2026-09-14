@@ -18,14 +18,24 @@ import {
 import { Simulation } from './sim/simulation';
 import { createTrafficQueue } from './sim/agents';
 import { buyParcel } from './sim/build';
+import { takeLoan } from './sim/economy';
 import { RoadType, Zone } from './sim/types';
 import { SAVE_KEY, hasSave, loadFromStorage, saveToStorage } from './sim/save';
 import { Renderer, Overlay, BuildPreview } from './render/renderer';
 import { Hud } from './ui/hud';
 import { InputController } from './ui/input';
-import { ToolState, applyTool, defaultTool, quoteTool, tilesForDrag, toolDraws, toolHint } from './ui/tools';
+import {
+  ToolState,
+  applyTool,
+  defaultTool,
+  quoteTool,
+  resolveCancel,
+  tilesForDrag,
+  toolDraws,
+  toolPreviewsHover,
+} from './ui/tools';
 import { createTitleScreen, randomValleyName } from './ui/title';
-import { el } from './ui/dom';
+import { el, gold } from './ui/dom';
 
 /** How often the city is written to local storage, in game days. */
 const AUTOSAVE_INTERVAL_DAYS = 90;
@@ -70,6 +80,7 @@ class Game {
         this.overlay = overlay;
       },
       onTaxChange: (zone, rate) => this.setTax(zone, rate),
+      onTakeLoan: () => this.borrow(),
       onBuyParcel: (px, py) => this.buyLand(px, py),
       onNewCity: () => this.newCity(),
       onSave: () => this.save(true),
@@ -77,6 +88,7 @@ class Game {
       onToggleZones: () => {
         /* the HUD holds the flag; nothing else to do */
       },
+      onToggleEdgeScroll: (enabled) => this.setEdgeScroll(enabled),
       onFocusBuilding: (building) => {
         const centre = buildingCenter(building);
         this.renderer.camera.centreOnTile(centre.x, centre.y);
@@ -92,6 +104,7 @@ class Game {
       onDragMove: (x, y) => this.handleDragMove(x, y),
       onDragEnd: () => this.handleDragEnd(),
       onDragCancel: () => this.cancelDrag(),
+      onCancel: () => this.cancel(),
       onHover: (x, y) => this.handleHover(x, y),
       onHoverEnd: () => {
         this.hoverTile = null;
@@ -99,6 +112,8 @@ class Game {
       isDrawing: () => toolDraws(this.tool),
     });
     this.input.onShortcut = (key) => this.handleShortcut(key);
+    this.input.edgeScroll = loadEdgeScroll();
+    this.hud.setEdgeScroll(this.input.edgeScroll);
 
     window.addEventListener('resize', this.handleResize);
     window.addEventListener('orientationchange', this.handleResize);
@@ -202,6 +217,16 @@ class Game {
     this.hud.setSpeed(speed);
   }
 
+  /** Ask the Crown for the standing offer, and say what it costs. */
+  private borrow(): void {
+    const loan = takeLoan(this.city);
+    if (!loan) {
+      this.hud.showToast('The Crown will not lend twice at once', 'bad');
+      return;
+    }
+    this.hud.showToast(`The Crown advances ${gold(loan.principal)}`, 'good');
+  }
+
   private setTax(zone: Zone, rate: number): void {
     if (zone === Zone.Residential) this.city.budget.taxRateResidential = rate;
     else if (zone === Zone.Commercial) this.city.budget.taxRateCommercial = rate;
@@ -215,11 +240,10 @@ class Game {
       this.preview = null;
       return;
     }
-    if (this.tool.kind === 'build' || this.tool.kind === 'land') {
-      this.preview = quoteTool(this.city, this.tool, [tile]).preview;
-    } else if (!this.dragStart) {
-      this.preview = null;
-    }
+    // Mid-drag the drag itself owns the preview; otherwise quote the one
+    // tile under the cursor so a click is never blind.
+    if (this.dragStart) return;
+    this.preview = toolPreviewsHover(this.tool) ? quoteTool(this.city, this.tool, [tile]).preview : null;
   }
 
   private handleTap(screenX: number, screenY: number): void {
@@ -278,12 +302,32 @@ class Game {
     this.preview = null;
   }
 
+  /** Escape, or a right click: back out of the tool first, then the panel. */
+  private cancel(): void {
+    switch (resolveCancel(this.tool, this.hud.panelIsOpen)) {
+      case 'drop-tool':
+        // Deliberately not `selectTool`: that would shut the catalogue too,
+        // and the point of backing out is to choose again from it.
+        this.setTool({ kind: 'inspect' });
+        this.hud.setTool(this.tool);
+        break;
+      case 'close-panel':
+        this.hud.closePanel();
+        break;
+      default:
+        break;
+    }
+  }
+
+  private setEdgeScroll(enabled: boolean): void {
+    this.input.edgeScroll = enabled;
+    saveEdgeScroll(enabled);
+  }
+
   private handleShortcut(key: string): void {
     switch (key) {
       case 'escape':
-        this.setTool({ kind: 'inspect' });
-        this.hud.setTool(this.tool);
-        this.hud.closePanel();
+        this.cancel();
         break;
       case '1':
       case '2':
@@ -291,27 +335,35 @@ class Game {
       case '4':
         this.setSpeed(Number(key) - 1);
         break;
+      case 'tab':
+        this.hud.cyclePanel();
+        break;
+      case 'i':
+        this.hud.selectTool('inspect');
+        break;
       case 'r':
-        this.setTool({ kind: 'road', roadType: RoadType.Cobble });
-        this.hud.setTool(this.tool);
-        this.hud.showHint(toolHint(this.tool));
+        this.hud.selectTool('road', { roadType: RoadType.Cobble });
         break;
       case 'z':
-        this.setTool({ kind: 'zone', zone: Zone.Residential });
-        this.hud.setTool(this.tool);
-        this.hud.showHint(toolHint(this.tool));
+        this.hud.selectTool('zone', { zone: Zone.Residential });
+        break;
+      case 't':
+        this.hud.selectTool('zone', { zone: Zone.Commercial });
+        break;
+      case 'c':
+        this.hud.selectTool('zone', { zone: Zone.Industrial });
+        break;
+      case 'b':
+        this.hud.selectTool('build');
+        break;
+      case 'l':
+        this.hud.selectTool('land');
         break;
       case 'x':
-        this.setTool({ kind: 'demolish' });
-        this.hud.setTool(this.tool);
-        this.hud.showHint(toolHint(this.tool));
+        this.hud.selectTool('demolish');
         break;
-      case 'q':
-        this.renderer.camera.orbitByScreen(-110, 0);
-        break;
-      case 'e':
-        this.renderer.camera.orbitByScreen(110, 0);
-        break;
+      // Q and E turn the view, but the input layer does it per frame off the
+      // held-key set, so that holding one turns smoothly rather than in jumps.
       default:
         break;
     }
@@ -377,6 +429,26 @@ class Game {
     this.lastAutosaveDay = city.clock.totalDays;
     this.renderer.camera.setWorldBounds(city.width, city.height, city.map);
     this.frameDistrict(city);
+  }
+}
+
+/** Where the edge-scrolling preference lives between sessions. */
+const EDGE_SCROLL_KEY = 'azeroth-skylines-edge-scroll';
+
+function loadEdgeScroll(): boolean {
+  try {
+    return window.localStorage.getItem(EDGE_SCROLL_KEY) === '1';
+  } catch {
+    // Storage can be blocked outright; the setting simply does not persist.
+    return false;
+  }
+}
+
+function saveEdgeScroll(enabled: boolean): void {
+  try {
+    window.localStorage.setItem(EDGE_SCROLL_KEY, enabled ? '1' : '0');
+  } catch {
+    /* nothing to do; the setting still holds for this session */
   }
 }
 

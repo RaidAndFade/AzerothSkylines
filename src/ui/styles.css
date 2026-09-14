@@ -66,6 +66,9 @@ body {
   inset: 0;
   display: block;
   touch-action: none;
+  /* The input layer swaps this for crosshair and grabbing as the tool and
+     the gesture change; this is the resting state. */
+  cursor: grab;
 }
 
 /* --- shared surfaces ----------------------------------------------------- */
@@ -286,6 +289,7 @@ body {
 }
 
 .tool {
+  position: relative;
   flex: 0 0 auto;
   width: 54px;
   height: 52px;
@@ -315,6 +319,23 @@ body {
   background: linear-gradient(180deg, #6E5423, #3A2A10);
   color: var(--gold);
   box-shadow: 0 0 0 1px rgba(232, 190, 85, 0.35), 0 0 12px rgba(232, 190, 85, 0.25);
+}
+
+.tool .badge {
+  position: absolute;
+  top: 3px;
+  right: 4px;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 3px;
+  border-radius: 7px;
+  background: var(--bad);
+  color: #FFF1EC;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 14px;
+  text-align: center;
+  box-shadow: 0 0 6px rgba(192, 83, 63, 0.6);
 }
 
 .tool.residential.active { border-color: var(--residential); color: #A8E0A0; }
@@ -421,6 +442,12 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
+.card .after {
+  font-size: 10.5px;
+  color: var(--parchment-dim);
+  font-variant-numeric: tabular-nums;
+}
+
 .card .blurb {
   font-size: 10.5px;
   line-height: 1.35;
@@ -463,6 +490,21 @@ body {
 
 .row .val {
   font-variant-numeric: tabular-nums;
+  font-weight: 700;
+}
+
+.row .val.good { color: var(--good); }
+.row .val.bad { color: var(--bad); }
+
+/* A total rules off the lines above it. */
+.row.total {
+  margin-top: 2px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(200, 160, 70, 0.25);
+}
+
+.row.total .key {
+  color: var(--parchment);
   font-weight: 700;
 }
 
@@ -546,6 +588,28 @@ body {
   color: var(--gold);
 }
 
+/* What the rate beside it is worth this month. */
+.slider-row .take {
+  flex: 0 0 62px;
+  text-align: right;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--parchment-dim);
+}
+
+@media (max-width: 400px) {
+  .slider-row label {
+    flex-basis: 70px;
+  }
+}
+
+/* A standing problem the player needs to see the moment the panel opens. */
+.blurb.alarm {
+  border-left: 2px solid var(--bad);
+  padding-left: 8px;
+  color: #E8A08F;
+}
+
 .action {
   display: block;
   width: 100%;
@@ -591,6 +655,7 @@ body {
 
 .journal-entry.good { border-left-color: var(--good); }
 .journal-entry.bad { border-left-color: var(--bad); }
+.journal-entry.unread { background: rgba(44, 30, 12, 0.75); }
 
 .journal-entry .when {
   display: block;

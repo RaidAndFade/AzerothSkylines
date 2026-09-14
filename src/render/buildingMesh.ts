@@ -27,6 +27,8 @@ import {
   cone,
   lathe,
   point,
+  ridgeHalfLength,
+  ridgeRunsAlongX,
   ridgedRoof,
   spheroid,
   tone,
@@ -237,6 +239,9 @@ export function addBuilding(
     floor,
     wallTop,
     ridge: wallTop + style.roofHeight,
+    roofWidth,
+    roofDepth,
+    hip: style.roofShape === 'hip' ? 1 : style.roofShape === 'halfHip' ? 0.34 : 0,
     width: footWidth,
     depth: footDepth,
     plotWidth: placement.width,
@@ -642,6 +647,11 @@ interface FeatureContext {
   floor: number;
   wallTop: number;
   ridge: number;
+  /** The roof's own plan, which is wider than the wall where it oversails. */
+  roofWidth: number;
+  roofDepth: number;
+  /** 0 for a gable, 1 for a full hip; how far the ridge is pulled in. */
+  hip: number;
   width: number;
   depth: number;
   plotWidth: number;
@@ -655,6 +665,26 @@ interface FeatureContext {
   abandoned: boolean;
 }
 
+/**
+ * A point on the ridge, `along` of the way from the middle toward one end
+ * (-1 to 1). Read from the same helpers the roof is built from, so the two
+ * cannot drift apart — a stack that thinks the ridge is elsewhere is a stack
+ * standing in mid-air.
+ */
+function onRidge(c: FeatureContext, along: number): { x: number; z: number } {
+  const half = ridgeHalfLength(c.roofWidth, c.roofDepth, c.hip);
+  const offset = half * Math.max(-1, Math.min(1, along));
+  return ridgeRunsAlongX(c.roofWidth, c.roofDepth) ? local(c, offset, 0) : local(c, 0, offset);
+}
+
+/**
+ * How far down a stack is founded: below the eaves, so that whatever the
+ * pitch, the roof surface meets solid masonry rather than a gap.
+ */
+function stackFoot(c: FeatureContext): number {
+  return c.wallTop - 0.1;
+}
+
 /** Rotate an offset in the building's own frame into world space. */
 function local(c: FeatureContext, ox: number, oz: number): { x: number; z: number } {
   const cos = Math.cos(c.yaw);
@@ -666,10 +696,14 @@ function addFeature(c: FeatureContext, feature: Feature): void {
   const mesh = c.mesh;
   switch (feature) {
     case 'chimney': {
-      // Brick or rubble stack, breaking the ridge off-centre.
-      const at = local(c, c.width * 0.28, -c.depth * 0.1);
+      // A brick stack, standing a third of the way along the ridge and
+      // founded below the eaves. Both matter: off the ridge it comes through
+      // a slope at an angle, and started any higher it leaves a gap under
+      // itself that the roof does not fill.
+      const at = onRidge(c, -1 / 3);
       const stack = colour(PALETTE.tileDark);
-      box(mesh, at.x, c.wallTop - 0.1, at.z, 0.22, c.ridge - c.wallTop + 0.34, 0.22, stack, {
+      const base = stackFoot(c);
+      box(mesh, at.x, base, at.z, 0.22, c.ridge + 0.34 - base, 0.22, stack, {
         yaw: c.yaw,
         taper: 0.12,
         skipBottom: true,
@@ -681,10 +715,15 @@ function addFeature(c: FeatureContext, feature: Feature): void {
       break;
     }
     case 'smokehood': {
-      // A poor cottage had no chimney: smoke left through a louvre in the roof.
-      const at = local(c, 0, 0);
+      // A poor cottage had no chimney: smoke left through a louvre set on
+      // the ridge, which is the only place it can sit without leaking.
+      const at = onRidge(c, 0);
       const louvre = colour(PALETTE.oakDark);
-      box(mesh, at.x, c.ridge - 0.06, at.z, 0.24, 0.16, 0.24, louvre, { yaw: c.yaw, skipBottom: true });
+      const base = stackFoot(c);
+      box(mesh, at.x, base, at.z, 0.24, c.ridge + 0.1 - base, 0.24, louvre, {
+        yaw: c.yaw,
+        skipBottom: true,
+      });
       cone(mesh, at.x, c.ridge + 0.1, at.z, 0.18, 0.16, 8, tone(c.roofColour, -0.06));
       break;
     }

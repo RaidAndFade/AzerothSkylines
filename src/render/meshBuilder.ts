@@ -473,6 +473,34 @@ export function spheroid(
 }
 
 /**
+ * Which way the ridge of a roof runs: along the long axis, since a roof
+ * drains best across the short one.
+ *
+ * Anything that stands on a roof has to agree with the roof about where the
+ * ridge is, so both read this rather than working it out twice.
+ */
+export function ridgeRunsAlongX(width: number, depth: number): boolean {
+  return width >= depth;
+}
+
+/**
+ * Half the length of the ridge, measured from the middle of the roof.
+ *
+ * A gable carries its ridge nearly the full length of the building; a full
+ * hip pulls it in to a point. Either way it stays inside the eaves, which is
+ * what lets a chimney stand on it.
+ */
+export function ridgeHalfLength(
+  width: number,
+  depth: number,
+  hip: number,
+  overhang = 0,
+): number {
+  const along = ridgeRunsAlongX(width, depth) ? width : depth;
+  return (along / 2 + overhang) * (1 - hip) * 0.92;
+}
+
+/**
  * A ridged roof over a rectangular plan.
  *
  * `hip` runs from 0 for a gable — vertical ends, the ridge the full length
@@ -500,10 +528,8 @@ export function ridgedRoof(
   const hw = width / 2 + overhang;
   const hd = depth / 2 + overhang;
   const ridgeY = eaveY + height;
-  // The ridge runs along the long axis, as a roof drains best across the
-  // short one.
-  const alongX = width >= depth;
-  const ridgeHalf = (alongX ? hw : hd) * (1 - hip) * 0.92;
+  const alongX = ridgeRunsAlongX(width, depth);
+  const ridgeHalf = ridgeHalfLength(width, depth, hip, overhang);
 
   const at = (ox: number, oz: number, y: number): Vec =>
     point(cx + ox * cos + oz * sin, y, cz + oz * cos - ox * sin);

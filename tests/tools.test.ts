@@ -8,9 +8,11 @@ import {
   elbowPath,
   quoteTool,
   rectangle,
+  resolveCancel,
   tilesForDrag,
   toolDraws,
   toolHint,
+  toolPreviewsHover,
 } from '@/ui/tools';
 import { makeFlatCity, mainRoadY, zoneRect } from './helpers';
 
@@ -194,5 +196,27 @@ describe('committing a tool', () => {
     const before = city.budget.gold;
     expect(applyTool(city, defaultTool(), [{ x: 4, y: 4 }]).applied).toBe(0);
     expect(city.budget.gold).toBe(before);
+  });
+});
+
+describe('backing out of a tool', () => {
+  it('puts the tool down first and closes the panel only after', () => {
+    const build = { ...defaultTool(), kind: 'build' as const, buildDefId: 'well' };
+    // A right click in the catalogue drops the building, leaving the
+    // catalogue open to choose another from.
+    expect(resolveCancel(build, true)).toBe('drop-tool');
+    expect(resolveCancel(defaultTool(), true)).toBe('close-panel');
+  });
+
+  it('drops a tool even with nothing open, and does nothing when idle', () => {
+    expect(resolveCancel({ ...defaultTool(), kind: 'road' }, false)).toBe('drop-tool');
+    expect(resolveCancel(defaultTool(), false)).toBe('none');
+  });
+
+  it('previews a hovered tile for every tool that changes the map', () => {
+    for (const kind of ['road', 'zone', 'demolish', 'build', 'land'] as const) {
+      expect(toolPreviewsHover({ ...defaultTool(), kind })).toBe(true);
+    }
+    expect(toolPreviewsHover(defaultTool())).toBe(false);
   });
 });

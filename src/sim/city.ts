@@ -59,6 +59,30 @@ export const ROAD_NAMES: Record<RoadType, string> = {
   [RoadType.Avenue]: 'Flagstone Avenue',
 };
 
+export type JournalTone = 'good' | 'bad' | 'info';
+
+/** One line of the Chronicle. */
+export interface JournalEntry {
+  /** Total elapsed game-days when it was written. */
+  day: number;
+  /** The calendar date it was written on, so entries can show it. */
+  dayOfMonth: number;
+  /** 1-based month, indexing `MONTH_NAMES`. */
+  month: number;
+  year: number;
+  text: string;
+  tone: JournalTone;
+  /** Cleared once the player has opened the Chronicle since it was written. */
+  unread: boolean;
+}
+
+/**
+ * How many entries the Chronicle keeps. Entries are a couple of dozen bytes
+ * each, so this is generous — the cap exists to bound the save, not to ration
+ * what the player is told.
+ */
+export const JOURNAL_LIMIT = 200;
+
 export interface CityState {
   readonly map: WorldMap;
   readonly width: number;
@@ -106,7 +130,19 @@ export interface CityState {
   /** Set when ownership changes, so walls are rebuilt on the next tick. */
   wallsDirty: boolean;
   /** Rolling log of notable events, newest last. */
-  journal: { day: number; text: string; tone: 'good' | 'bad' | 'info' }[];
+  journal: JournalEntry[];
+  /**
+   * The day each standing grievance was last raised in the Chronicle, keyed
+   * by complaint. Kept so a shortage that lasts a year is mentioned once a
+   * season rather than every time the city is reviewed.
+   */
+  complaints: Record<string, number>;
+  /**
+   * The highest population the Chronicle has already announced against.
+   * Milestones and building unlocks fire when the city passes this, so they
+   * are announced once and never again — including across a save.
+   */
+  announcedPopulation: number;
 }
 
 export interface CityOptions {
@@ -164,6 +200,9 @@ export function createCity(options: CityOptions = {}): CityState {
       lastUpkeep: 0,
       lastTrade: 0,
       tradeAccumulator: 0,
+      history: [],
+      loan: null,
+      arrears: 0,
     },
     stats: emptyStats(),
     clock: { totalDays: 0, day: 1, month: 1, year: 24, dayFraction: 0 },
@@ -172,6 +211,8 @@ export function createCity(options: CityOptions = {}): CityState {
     dirtyTiles: new Set(),
     wallsDirty: true,
     journal: [],
+    complaints: {},
+    announcedPopulation: 0,
   };
 
   initParcels(city);
@@ -248,13 +289,32 @@ export function markRectDirty(city: CityState, x: number, y: number, w: number, 
   }
 }
 
-export function logEvent(
-  city: CityState,
-  text: string,
-  tone: 'good' | 'bad' | 'info' = 'info',
-): void {
-  city.journal.push({ day: city.clock.totalDays, text, tone });
-  if (city.journal.length > 60) city.journal.shift();
+export function logEvent(city: CityState, text: string, tone: JournalTone = 'info'): void {
+  const clock = city.clock;
+  city.journal.push({
+    day: clock.totalDays,
+    dayOfMonth: clock.day,
+    month: clock.month,
+    year: clock.year,
+    text,
+    tone,
+    unread: true,
+  });
+  while (city.journal.length > JOURNAL_LIMIT) city.journal.shift();
+}
+
+/** How many entries the player has not seen, optionally of one tone only. */
+export function unreadJournalCount(city: CityState, tone?: JournalTone): number {
+  let count = 0;
+  for (const entry of city.journal) {
+    if (entry.unread && (tone === undefined || entry.tone === tone)) count++;
+  }
+  return count;
+}
+
+/** Called when the Chronicle is opened: everything in it has now been seen. */
+export function markJournalRead(city: CityState): void {
+  for (const entry of city.journal) entry.unread = false;
 }
 
 // --- parcels ----------------------------------------------------------------

@@ -10,30 +10,59 @@ import {
   Building,
   GOOD_LABELS,
   MONTH_NAMES,
+  MonthlyStatement,
   RoadType,
   SERVICE_LABELS,
   Zone,
 } from '../sim/types';
-import { CityState, ROAD_NAMES, buildingCenter, tileIndex } from '../sim/city';
+import {
+  CityState,
+  ROAD_NAMES,
+  buildingCenter,
+  markJournalRead,
+  tileIndex,
+  unreadJournalCount,
+} from '../sim/city';
 import { PLACEABLE_DEFS, getDef } from '../data/buildings';
 import { ToolKind, ToolState, toolHint } from './tools';
 import { Overlay } from '../render/renderer';
 import { append, button, clear, compact, el, gold, percent, statRow } from './dom';
 import { quoteParcel } from '../sim/build';
+import {
+  ARREARS_GRACE,
+  MONTHS_PER_YEAR,
+  loanOffer,
+  projectMonth,
+  serviceAusterity,
+  taxBase,
+  upkeepByType,
+} from '../sim/economy';
 import { wallStats } from '../sim/walls';
 
 export type PanelId = 'build' | 'budget' | 'city' | 'journal' | 'building' | 'land' | 'overlays' | 'menu' | 'guide';
+
+/** The panels Tab walks through, in the order the toolbar offers them. */
+const PANEL_CYCLE: PanelId[] = ['build', 'overlays', 'budget', 'journal', 'city', 'menu'];
+
+/**
+ * Panels showing figures that move as the city runs, and so are redrawn as it
+ * does. The rest — the views, the menu, the guide — are drawn once when they
+ * open and again only when something on them is pressed.
+ */
+const LIVE_PANELS: readonly PanelId[] = ['build', 'budget', 'city', 'journal', 'building', 'land'];
 
 export interface HudCallbacks {
   onToolChange(tool: Partial<ToolState> & { kind: ToolKind }): void;
   onSpeedChange(speed: number): void;
   onOverlayChange(overlay: Overlay): void;
   onTaxChange(zone: Zone, rate: number): void;
+  onTakeLoan(): void;
   onBuyParcel(px: number, py: number): void;
   onNewCity(): void;
   onSave(): void;
   onLoad(): void;
   onToggleZones(): void;
+  onToggleEdgeScroll(enabled: boolean): void;
   onFocusBuilding(building: Building): void;
 }
 
@@ -62,9 +91,42 @@ const OVERLAYS: { id: Overlay; label: string }[] = [
   { id: 'land', label: 'Lots for Sale' },
 ];
 
+/** How long after a press the panel waits before it may redraw itself. */
+const PANEL_SETTLE_MS = 250;
+
 /** "1 gate", "3 gates" — small thing, but the HUD is read constantly. */
 function plural(count: number, noun: string): string {
   return `${count} ${noun}${count === 1 ? '' : 's'}`;
+}
+
+/** "Bloomrise 24", the calendar the rest of the HUD shows. */
+function monthAndYear(month: number, year: number): string {
+  return `${MONTH_NAMES[(month - 1) % 12]} ${year}`;
+}
+
+/**
+ * A line of the ledger: money in reads green and money out red, and the sign
+ * is always shown, so a column of them can be skimmed for the one that hurts.
+ */
+function ledgerRow(key: string, amount: number, total = false): HTMLElement {
+  const rounded = Math.round(amount);
+  const tone = rounded > 0 ? 'good' : rounded < 0 ? 'bad' : '';
+  const sign = rounded > 0 ? '+' : rounded < 0 ? '-' : '';
+  return el(
+    'div',
+    { class: `row${total ? ' total' : ''}` },
+    el('span', { class: 'key', text: key }),
+    el('span', { class: `val ${tone}`, text: `${sign}${gold(Math.abs(rounded))}` }),
+  );
+}
+
+/** The zone totals of a statement, which are always wanted together. */
+function totalTaxes(statement: MonthlyStatement): number {
+  return statement.residentialTax + statement.commercialTax + statement.industrialTax;
+}
+
+function totalUpkeepOf(statement: MonthlyStatement): number {
+  return statement.buildingUpkeep + statement.roadUpkeep + statement.wallUpkeep;
 }
 
 export class Hud {
@@ -94,14 +156,24 @@ export class Hud {
   private readonly toast: HTMLElement;
   private readonly hint: HTMLElement;
 
+  /** Unread-bad-news marker on the Chronicle button; hidden when empty. */
+  private readonly journalBadge = el('span', { class: 'badge', hidden: true });
+
   private openPanel: PanelId | null = null;
   private toastTimer = 0;
-  private lastJournalLength = -1;
+  private lastUnreadBad = -1;
   private selectedBuilding: Building | null = null;
+  /** The panel's last drawn contents, so it is only rebuilt when they move. */
+  private panelSignature = '';
+  /** While a finger is on the panel — and briefly after — nothing is rebuilt. */
+  private panelHeld = false;
+  private panelSettlesAt = 0;
+  private projectionCache: { key: string; statement: MonthlyStatement } | null = null;
   private landSelection: { px: number; py: number } | null = null;
   private currentTool: ToolState;
   private currentOverlay: Overlay = 'none';
   private showZones = true;
+  private edgeScroll = false;
 
   constructor(root: HTMLElement, tool: ToolState, callbacks: HudCallbacks) {
     this.root = root;
@@ -128,6 +200,20 @@ export class Hud {
       this.panelBody,
     );
     root.appendChild(this.panel);
+
+    // A panel is rebuilt from scratch whenever its figures move. Rebuilding
+    // it under a finger would destroy the control being pressed — the press
+    // would never become a click, and a slider would go dead the moment it
+    // was dragged — so a redraw waits until the hand is off it.
+    this.panel.addEventListener('pointerdown', () => {
+      this.panelHeld = true;
+    });
+    const release = () => {
+      this.panelHeld = false;
+      this.panelSettlesAt = Date.now() + PANEL_SETTLE_MS;
+    };
+    window.addEventListener('pointerup', release);
+    window.addEventListener('pointercancel', release);
 
     this.toast = el('div', { id: 'toast' });
     root.appendChild(this.toast);
@@ -217,6 +303,7 @@ export class Hud {
         () => this.togglePanel('journal'),
         el('span', { class: 'glyph', text: '\u{1F4D6}' }),
         el('span', { text: 'Chronicle' }),
+        this.journalBadge,
       ),
     );
     return bar;
@@ -224,7 +311,8 @@ export class Hud {
 
   // --- tool selection -------------------------------------------------------
 
-  private selectTool(kind: ToolKind, extra?: Partial<ToolState>): void {
+  /** Pick a tool exactly as tapping its toolbar button would. */
+  selectTool(kind: ToolKind, extra?: Partial<ToolState>): void {
     this.currentTool = { ...this.currentTool, ...extra, kind };
     this.callbacks.onToolChange({ ...extra, kind });
     this.refreshToolButtons();
@@ -260,29 +348,87 @@ export class Hud {
     const budget = city.budget;
     this.stats.gold.textContent = gold(budget.gold);
 
-    const net = budget.lastIncome + budget.lastTrade - budget.lastUpkeep;
+    // The month the city is having, not the one it closed a fortnight ago:
+    // a market built this morning shows against the treasury this morning.
+    const net = this.projection(city).net;
     if (Math.abs(net) > 0.5) {
       this.stats.goldDelta.textContent = `${net > 0 ? '+' : ''}${compact(net)}`;
       this.stats.goldDelta.className = `delta ${net >= 0 ? 'up' : 'down'}`;
     } else {
       this.stats.goldDelta.textContent = '';
     }
+    this.stats.goldDelta.title = 'Projected for this month';
 
     this.stats.population.textContent = compact(city.stats.population);
     this.stats.happiness.textContent = percent(city.stats.happiness);
-    this.stats.date.textContent = `${MONTH_NAMES[(city.clock.month - 1) % 12]} ${city.clock.year}`;
+    this.stats.date.textContent = monthAndYear(city.clock.month, city.clock.year);
 
     this.demandBars.residential.style.height = `${city.demand.residential * 100}%`;
     this.demandBars.commercial.style.height = `${city.demand.commercial * 100}%`;
     this.demandBars.industrial.style.height = `${city.demand.industrial * 100}%`;
 
-    if (this.openPanel === 'city' || this.openPanel === 'budget' || this.openPanel === 'building') {
-      this.renderPanel(city);
+    // Badge the Chronicle with unread bad news, so something going wrong is
+    // visible without opening the panel to look for it.
+    const unread = this.openPanel === 'journal' ? 0 : unreadJournalCount(city, 'bad');
+    if (unread !== this.lastUnreadBad) {
+      this.lastUnreadBad = unread;
+      this.journalBadge.textContent = unread > 9 ? '9+' : String(unread);
+      this.journalBadge.hidden = unread === 0;
     }
-    if (city.journal.length !== this.lastJournalLength) {
-      this.lastJournalLength = city.journal.length;
-      if (this.openPanel === 'journal') this.renderPanel(city);
+
+    this.refreshPanel(city);
+  }
+
+  /**
+   * The month's projection.
+   *
+   * It is a survey of every building in the city; at sixty frames a second
+   * that is not free, and none of what it rests on moves within a game-day
+   * unless the player spends, builds or shifts a tithe.
+   */
+  private projection(city: CityState): MonthlyStatement {
+    const budget = city.budget;
+    const key = [
+      city.clock.totalDays,
+      Math.round(budget.gold),
+      city.buildings.size,
+      budget.taxRateResidential,
+      budget.taxRateCommercial,
+      budget.taxRateIndustrial,
+      budget.loan ? budget.loan.outstanding : 0,
+    ].join('|');
+    if (!this.projectionCache || this.projectionCache.key !== key) {
+      this.projectionCache = { key, statement: projectMonth(city) };
     }
+    return this.projectionCache.statement;
+  }
+
+  /** Redraw the open panel, but only once something on it has changed. */
+  private refreshPanel(city: CityState): void {
+    if (!this.openPanel || !LIVE_PANELS.includes(this.openPanel)) return;
+    if (this.panelState(city) === this.panelSignature) return;
+    if (this.panelHeld || Date.now() < this.panelSettlesAt) return;
+    this.renderPanel(city);
+  }
+
+  /**
+   * Everything an open panel draws from, rolled into one string. Nothing a
+   * panel shows moves more often than once a game-day or once a purchase, so
+   * this is what stands between the interface and a rebuild every frame.
+   */
+  private panelState(city: CityState): string {
+    return [
+      this.openPanel,
+      city.clock.totalDays,
+      Math.round(city.budget.gold),
+      city.buildings.size,
+      city.journal.length,
+      this.selectedBuilding ? this.selectedBuilding.id : 0,
+      this.landSelection ? `${this.landSelection.px},${this.landSelection.py}` : '',
+      this.currentTool.kind,
+      this.currentTool.buildDefId ?? '',
+      this.currentTool.roadType,
+    ].join('|');
   }
 
   // --- panels ---------------------------------------------------------------
@@ -306,6 +452,16 @@ export class Hud {
   closePanel(): void {
     this.openPanel = null;
     this.panel.classList.remove('open');
+  }
+
+  get panelIsOpen(): boolean {
+    return this.openPanel !== null;
+  }
+
+  /** Tab: step to the next panel, starting from the first when none is open. */
+  cyclePanel(): void {
+    const index = this.openPanel === null ? -1 : PANEL_CYCLE.indexOf(this.openPanel);
+    this.togglePanel(PANEL_CYCLE[(index + 1) % PANEL_CYCLE.length], true);
   }
 
   selectBuilding(building: Building | null): void {
@@ -367,6 +523,7 @@ export class Hud {
         break;
     }
     body.scrollTop = scroll;
+    this.panelSignature = this.panelState(city);
   }
 
   private renderRoads(body: HTMLElement): void {
@@ -434,7 +591,16 @@ export class Hud {
           el('span', { class: 'name', text: def.name }),
           el('span', {
             class: 'cost',
-            text: `${gold(def.cost)}${def.upkeep ? ` · ${def.upkeep}g/mo` : ''}`,
+            text: `${gold(def.cost)}${def.upkeep ? ` \u00B7 ${def.upkeep}g/mo` : ''}`,
+            style: affordable ? '' : 'color:var(--bad)',
+          }),
+          // The price is only half of what it costs to say yes: the treasury
+          // it leaves behind, and the standing bill it signs the city up to.
+          el('span', {
+            class: 'after',
+            text: `Leaves ${gold(city.budget.gold - def.cost)}${
+              def.upkeep ? ` \u00B7 ${gold(def.upkeep * MONTHS_PER_YEAR)} a year` : ''
+            }`,
             style: affordable ? '' : 'color:var(--bad)',
           }),
           el('span', { class: 'blurb', text: def.description }),
@@ -449,48 +615,192 @@ export class Hud {
     }
   }
 
+  /**
+   * The Treasury: what this month is doing, what it is being spent on, what
+   * the tithes are worth, what the Crown will lend, and the year behind.
+   */
   private renderBudget(city: CityState, body: HTMLElement): void {
     const budget = city.budget;
-    const net = budget.lastIncome + budget.lastTrade - budget.lastUpkeep;
+    const projection = this.projection(city);
+    // A tithe scales the take linearly, so a full rate priced once here is
+    // enough to re-price every slider as it moves.
+    const base = taxBase(city);
 
-    const taxRow = (label: string, zone: Zone, rate: number) => {
-      const value = el('span', { class: 'val', text: percent(rate) });
-      const slider = el('input', {
-        type: 'range',
-        min: '0',
-        max: '35',
-        step: '1',
-        value: String(Math.round(rate * 100)),
-      }) as HTMLInputElement;
-      slider.addEventListener('input', () => {
-        const next = Number(slider.value) / 100;
-        value.textContent = percent(next);
-        this.callbacks.onTaxChange(zone, next);
-      });
-      return el('div', { class: 'slider-row' }, el('label', { text: label }), slider, value);
-    };
+    if (budget.arrears > 0) this.renderArrears(city, body);
 
     append(body, [
-      el('div', { class: 'section-title', text: 'Last Month' }),
+      el('div', {
+        class: 'section-title',
+        text: `This Month \u2014 ${MONTH_NAMES[(projection.month - 1) % 12]}`,
+      }),
       el(
         'div',
         { class: 'rows' },
-        statRow('Taxes', gold(budget.lastIncome)),
-        statRow('Trade', gold(budget.lastTrade)),
-        statRow('Upkeep', budget.lastUpkeep > 0.5 ? `-${gold(budget.lastUpkeep)}` : gold(0)),
-        statRow('Net', `${net >= 0 ? '+' : ''}${gold(net)}`),
-        statRow('Treasury', gold(budget.gold)),
+        ledgerRow('Tithes', totalTaxes(projection)),
+        ledgerRow('Trade', projection.trade),
+        ledgerRow('Upkeep', -totalUpkeepOf(projection)),
+        projection.loanRepayment > 0.5 ? ledgerRow('Crown\u2019s instalment', -projection.loanRepayment) : null,
+        ledgerRow('Net', projection.net, true),
+        statRow('Treasury now', gold(budget.gold)),
+        statRow('At month\u2019s end', gold(projection.closingGold)),
       ),
-      el('div', { class: 'section-title', text: 'Tithes' }),
-      taxRow('Dwellings', Zone.Residential, budget.taxRateResidential),
-      taxRow('Trade', Zone.Commercial, budget.taxRateCommercial),
-      taxRow('Crafting', Zone.Industrial, budget.taxRateIndustrial),
       el('div', {
         class: 'blurb',
         style: 'margin-top:8px',
-        text: 'A tithe of one in ten is expected. Beyond that, folk grumble and then leave.',
+        text: 'Projected from the city as it stands. Trade is carried forward at the rate it has run so far this month.',
+      }),
+      el('div', { class: 'section-title', text: 'Tithes' }),
+      this.taxRow('Dwellings', Zone.Residential, budget.taxRateResidential, base.residential),
+      this.taxRow('Trade', Zone.Commercial, budget.taxRateCommercial, base.commercial),
+      this.taxRow('Crafting', Zone.Industrial, budget.taxRateIndustrial, base.industrial),
+      el('div', {
+        class: 'blurb',
+        style: 'margin-top:8px',
+        text: 'A tithe of one in ten is expected. Beyond that, folk grumble and then leave. Beside each rate is what it is worth this month.',
       }),
     ]);
+
+    this.renderUpkeepBreakdown(city, body, projection);
+    this.renderCrown(city, body);
+    this.renderLedger(budget.history, body);
+  }
+
+  /** A rate, with what it is currently worth beside it. */
+  private taxRow(label: string, zone: Zone, rate: number, fullRate: number): HTMLElement {
+    const value = el('span', { class: 'val', text: percent(rate) });
+    const take = el('span', { class: 'take', text: gold(fullRate * rate) });
+    const slider = el('input', {
+      type: 'range',
+      min: '0',
+      max: '35',
+      step: '1',
+      value: String(Math.round(rate * 100)),
+      'aria-label': `${label} tithe`,
+    }) as HTMLInputElement;
+    slider.addEventListener('input', () => {
+      const next = Number(slider.value) / 100;
+      value.textContent = percent(next);
+      // Re-price in place rather than rebuilding the panel under the finger.
+      take.textContent = gold(fullRate * next);
+      this.callbacks.onTaxChange(zone, next);
+    });
+    return el('div', { class: 'slider-row' }, el('label', { text: label }), slider, value, take);
+  }
+
+  /** What the city is actually paying for, dearest first. */
+  private renderUpkeepBreakdown(
+    city: CityState,
+    body: HTMLElement,
+    projection: MonthlyStatement,
+  ): void {
+    const lines = upkeepByType(city);
+    const shown = lines.slice(0, 8);
+    const rest = lines.slice(8).reduce((sum, line) => sum + line.upkeep, 0);
+
+    append(body, [
+      el('div', { class: 'section-title', text: 'Where It Goes' }),
+      el(
+        'div',
+        { class: 'rows' },
+        ledgerRow('Streets', -projection.roadUpkeep),
+        ledgerRow('Walls and gates', -projection.wallUpkeep),
+        ...shown.map((line) =>
+          ledgerRow(line.count > 1 ? `${line.name} \u00D7${line.count}` : line.name, -line.upkeep),
+        ),
+        rest > 0.5 ? ledgerRow('Everything else', -rest) : null,
+        ledgerRow('Every month', -totalUpkeepOf(projection), true),
+      ),
+    ]);
+  }
+
+  /** The state of the city's debts, and what it can still borrow. */
+  private renderCrown(city: CityState, body: HTMLElement): void {
+    const loan = city.budget.loan;
+    body.appendChild(el('div', { class: 'section-title', text: 'The Crown' }));
+
+    if (loan) {
+      append(body, [
+        el(
+          'div',
+          { class: 'rows' },
+          statRow('Still owed', gold(loan.outstanding)),
+          statRow('Each month', gold(loan.payment)),
+          statRow('Instalments left', plural(loan.monthsRemaining, 'month')),
+        ),
+        el('div', {
+          class: 'blurb',
+          style: 'margin-top:8px',
+          text: 'The instalment is taken before the city\u2019s own bills, whether or not the tithes cover it. The Crown will not lend again until it is cleared.',
+        }),
+      ]);
+      return;
+    }
+
+    const offer = loanOffer(city);
+    append(body, [
+      el(
+        'div',
+        { class: 'rows' },
+        statRow('Advance', gold(offer.principal)),
+        statRow('Repayment', `${gold(offer.payment)} a month`),
+        statRow('Term', plural(offer.months, 'month')),
+        statRow('Interest', gold(offer.total - offer.principal)),
+      ),
+      button(
+        'action',
+        () => this.callbacks.onTakeLoan(),
+        `Ask the Crown for ${gold(offer.principal)}`,
+      ),
+    ]);
+  }
+
+  /** The year behind, newest first, so a slide shows before it is a crisis. */
+  private renderLedger(history: readonly MonthlyStatement[], body: HTMLElement): void {
+    if (history.length === 0) return;
+    const recent = history.slice(-6).reverse();
+    const last = recent[0];
+
+    append(body, [
+      el('div', {
+        class: 'section-title',
+        text: `Last Month \u2014 ${monthAndYear(last.month, last.year)}`,
+      }),
+      el(
+        'div',
+        { class: 'rows' },
+        ledgerRow('Dwellings', last.residentialTax),
+        ledgerRow('Trade quarter', last.commercialTax),
+        ledgerRow('Crafting', last.industrialTax),
+        ledgerRow('Buildings', -last.buildingUpkeep),
+        ledgerRow('Streets', -last.roadUpkeep),
+        ledgerRow('Walls', -last.wallUpkeep),
+        last.loanRepayment > 0.5 ? ledgerRow('Crown\u2019s instalment', -last.loanRepayment) : null,
+        ledgerRow('Caravans', last.trade),
+        ledgerRow('Net', last.net, true),
+      ),
+      el('div', { class: 'section-title', text: 'Months Closed' }),
+      el(
+        'div',
+        { class: 'rows' },
+        ...recent.map((month) =>
+          ledgerRow(monthAndYear(month.month, month.year), month.net),
+        ),
+      ),
+    ]);
+  }
+
+  /** What being in the red is costing the city, spelled out. */
+  private renderArrears(city: CityState, body: HTMLElement): void {
+    const months = city.budget.arrears;
+    body.appendChild(
+      el('div', {
+        class: 'blurb alarm',
+        text:
+          months <= ARREARS_GRACE
+            ? 'The treasury is in the red. Another month of this and the city\u2019s servants go unpaid.'
+            : `${plural(months, 'month')} in arrears. Unpaid, the guard, the chapels and the markets are doing ${percent(serviceAusterity(city))} of their work \u2014 and will do less the longer the debt stands.`,
+      }),
+    );
   }
 
   private renderCityReport(city: CityState, body: HTMLElement): void {
@@ -543,19 +853,21 @@ export class Hud {
   private renderJournal(city: CityState, body: HTMLElement): void {
     const list = el('div', { class: 'journal' });
     for (const entry of city.journal) {
-      list.appendChild(
-        el(
-          'div',
-          { class: `journal-entry ${entry.tone}` },
-          el('span', { class: 'when', text: `Day ${entry.day}` }),
-          entry.text,
-        ),
+      const row = el(
+        'div',
+        { class: `journal-entry ${entry.tone}${entry.unread ? ' unread' : ''}` },
+        el('span', { class: 'when', text: monthAndYear(entry.month, entry.year) }),
+        entry.text,
       );
+      row.title = `Day ${entry.day}`;
+      list.appendChild(row);
     }
     if (city.journal.length === 0) {
       list.appendChild(el('div', { class: 'journal-entry', text: 'Nothing of note has happened yet.' }));
     }
     body.appendChild(list);
+    // Rendered is read: the badge clears as soon as the player looks.
+    markJournalRead(city);
   }
 
   private renderBuilding(city: CityState, body: HTMLElement): void {
@@ -628,7 +940,11 @@ export class Hud {
             statRow('Land', gold(quote.land)),
             statRow('Masonry', gold(quote.masonry)),
             statRow('Total', gold(quote.total)),
-            statRow('Treasury', gold(city.budget.gold)),
+            statRow('Treasury after', gold(city.budget.gold - quote.total)),
+            statRow(
+              'Wall upkeep',
+              `${quote.upkeep >= 0 ? '+' : '-'}${gold(Math.abs(quote.upkeep))} a month`,
+            ),
           )
         : el('div', { class: 'blurb', text: quote.reason ?? 'This land is not for sale.' }),
       quote.ok
@@ -699,7 +1015,7 @@ export class Hud {
       ],
       [
         'Walk round it',
-        'The valley is a real place, so look at it from anywhere: drag with the right button — or twist with two fingers — to turn and tilt, scroll or pinch to come closer. Coming in drops the view toward the street; pulling back lifts it over the district. Q and E turn a step at a time.',
+        'The valley is a real place, so look at it from anywhere: drag with the middle button — or twist with two fingers — to turn and tilt, and hold Q or E to turn a step at a time. The right button slides the map about whatever tool you are holding, and the wheel or a pinch brings you in. Coming in drops the view toward the street; pulling back lifts it over the district.',
       ],
     ];
 
@@ -732,8 +1048,23 @@ export class Hud {
         class: 'blurb',
         html:
           'One finger drags the map, or draws while a tool is held. Two fingers pinch to zoom and move.<br>' +
-          'On a keyboard: <b>WASD</b> to scroll, <b>scroll wheel</b> to zoom, <b>1-4</b> for speed, <b>Esc</b> to put a tool down.',
+          'With a mouse, the <b>right</b> or <b>middle</b> button drags the map whatever tool is held, and a ' +
+          '<b>right click</b> puts the tool down. A wheel notch zooms; a two-finger trackpad scroll moves the map, ' +
+          'and <b>Ctrl</b>+scroll or a pinch zooms.',
       }),
+      el('div', {
+        class: 'blurb',
+        html:
+          '<b>WASD</b> or the arrows scroll &middot; <b>Q</b>/<b>E</b> (or <b>[</b>/<b>]</b>) zoom &middot; ' +
+          '<b>1</b>-<b>4</b> speed &middot; <b>Tab</b> next panel &middot; <b>Esc</b> or right click backs out<br>' +
+          'Tools: <b>I</b> inspect &middot; <b>R</b> roads &middot; <b>Z</b> dwellings &middot; <b>T</b> trade &middot; ' +
+          '<b>C</b> crafting &middot; <b>B</b> build &middot; <b>L</b> land &middot; <b>X</b> raze',
+      }),
+      button(`chip ${this.edgeScroll ? 'active' : ''}`, () => {
+        this.edgeScroll = !this.edgeScroll;
+        this.callbacks.onToggleEdgeScroll(this.edgeScroll);
+        if (this.city) this.renderPanel(this.city);
+      }, this.edgeScroll ? 'Edge scrolling: on' : 'Edge scrolling: off'),
     ]);
   }
 
@@ -761,6 +1092,12 @@ export class Hud {
 
   hideHint(): void {
     this.hint.classList.remove('show');
+  }
+
+  /** Reflect the edge-scroll setting the host restored from storage. */
+  setEdgeScroll(enabled: boolean): void {
+    this.edgeScroll = enabled;
+    if (this.city && this.openPanel === 'menu') this.renderPanel(this.city);
   }
 
   get zonesVisible(): boolean {

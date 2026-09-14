@@ -23,6 +23,10 @@ export const REFERENCE_DISTANCE = 34;
 export const MIN_ZOOM = REFERENCE_DISTANCE / MAX_DISTANCE;
 export const MAX_ZOOM = REFERENCE_DISTANCE / MIN_DISTANCE;
 
+/** Radians of turn per CSS pixel of orbit drag, and of tilt. */
+export const ORBIT_RADIANS_PER_PIXEL = 0.006;
+const TILT_RADIANS_PER_PIXEL = 0.005;
+
 /** Never level with the ground, and never straight down onto it. */
 const MIN_PITCH = 0.17;
 const MAX_PITCH = 1.4;
@@ -140,8 +144,8 @@ export class Camera {
 
   /** Turn about the target, and tilt between a low view and a high one. */
   orbitByScreen(dx: number, dy: number): void {
-    this.yaw -= dx * 0.006;
-    this.pitch = clamp(this.pitch + dy * 0.005, MIN_PITCH, MAX_PITCH);
+    this.yaw -= dx * ORBIT_RADIANS_PER_PIXEL;
+    this.pitch = clamp(this.pitch + dy * TILT_RADIANS_PER_PIXEL, MIN_PITCH, MAX_PITCH);
   }
 
   /**

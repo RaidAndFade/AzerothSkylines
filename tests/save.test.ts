@@ -1,6 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import { RoadType, Zone } from '@/sim/types';
-import { createBuilding, createCity, purchasableParcels, registerBuilding, tileIndex } from '@/sim/city';
+import {
+  createBuilding,
+  createCity,
+  logEvent,
+  purchasableParcels,
+  registerBuilding,
+  tileIndex,
+  unreadJournalCount,
+} from '@/sim/city';
 import { rebuildWalls } from '@/sim/walls';
 import { buyParcel } from '@/sim/build';
 import {
@@ -14,7 +22,7 @@ import {
   saveToStorage,
   serializeCity,
 } from '@/sim/save';
-import { Simulation } from '@/sim/simulation';
+import { Simulation, announceProgress } from '@/sim/simulation';
 import { createTrafficQueue } from '@/sim/agents';
 import { makeFlatCity, mainRoadY, zoneRect } from './helpers';
 
@@ -162,6 +170,122 @@ describe('saving and loading', () => {
     const json = JSON.stringify(serializeCity(city));
     // Comfortably inside the few megabytes a browser will hold.
     expect(json.length).toBeLessThan(1_000_000);
+  });
+});
+
+describe('the Chronicle across a save', () => {
+  function townAtPopulation(population: number) {
+    const city = makeFlatCity({ ownedParcels: 2 });
+    const y = mainRoadY();
+    zoneRect(city, Zone.Residential, 2, y + 1, 6, 1);
+    const house = createBuilding(city, 'house4', 3, y + 1);
+    house.residents = population;
+    registerBuilding(city, house);
+    city.stats.population = population;
+    return city;
+  }
+
+  it('does not re-announce milestones and unlocks after a load', () => {
+    const city = townAtPopulation(200);
+    announceProgress(city);
+    const announced = city.journal.length;
+    expect(announced).toBeGreaterThan(0);
+
+    const restored = deserializeCity(serializeCity(city));
+    expect(restored.announcedPopulation).toBe(200);
+
+    const sim = new Simulation(restored, createTrafficQueue());
+    for (let day = 0; day < 20; day++) sim.runDay();
+
+    // The same lines are still there, and no copy of any of them.
+    const texts = restored.journal.map((entry) => entry.text);
+    for (const entry of city.journal) {
+      expect(texts.filter((text) => text === entry.text)).toHaveLength(1);
+    }
+  });
+
+  it('treats a save from before progress was tracked as already announced', () => {
+    const city = townAtPopulation(200);
+    const data = serializeCity(city);
+    // An older save carries neither field.
+    delete data.announcedPopulation;
+    delete data.complaints;
+
+    const restored = deserializeCity(data);
+    expect(restored.complaints).toEqual({});
+    // Derived from the people it was saved with, so nothing already passed is
+    // announced a second time.
+    expect(restored.announcedPopulation).toBe(200);
+    announceProgress(restored);
+    expect(restored.journal.filter((entry) => entry.text.includes('now a'))).toHaveLength(0);
+  });
+
+  it('counts a derelict house towards the mark, as the simulation does', () => {
+    // Residents of an abandoned dwelling still count in `stats.population`.
+    // Miss them here and the first simulated day reports more people than the
+    // derived mark, and re-announces a milestone the city passed long ago.
+    const city = townAtPopulation(58);
+    const derelict = createBuilding(city, 'house4', 6, mainRoadY() + 1);
+    derelict.residents = 60;
+    derelict.abandoned = true;
+    registerBuilding(city, derelict);
+
+    const data = serializeCity(city);
+    delete data.announcedPopulation;
+    const restored = deserializeCity(data);
+    expect(restored.announcedPopulation).toBe(118);
+
+    const sim = new Simulation(restored, createTrafficQueue());
+    for (let day = 0; day < 15; day++) sim.runDay();
+    expect(restored.journal.filter((entry) => entry.text.includes('now a Hamlet'))).toHaveLength(0);
+  });
+
+  it('carries the Chronicle, its dates and what is still unread', () => {
+    const city = townAtPopulation(50);
+    city.clock.day = 24;
+    city.clock.month = 4;
+    city.clock.year = 26;
+    logEvent(city, 'Something went wrong.', 'bad');
+
+    const restored = deserializeCity(serializeCity(city));
+    const entry = restored.journal.at(-1);
+    expect(entry?.text).toBe('Something went wrong.');
+    expect(entry?.month).toBe(4);
+    expect(entry?.dayOfMonth).toBe(24);
+    expect(entry?.year).toBe(26);
+    expect(unreadJournalCount(restored, 'bad')).toBe(1);
+  });
+
+  it('dates entries from an older save that carried only a day count', () => {
+    const city = townAtPopulation(50);
+    city.clock.totalDays = 400;
+    city.clock.day = 11;
+    city.clock.month = 2;
+    city.clock.year = 25;
+    logEvent(city, 'Long ago.', 'info');
+
+    const data = serializeCity(city);
+    // An older save's entries are { day, text, tone } and nothing more.
+    data.journal = data.journal.map(
+      (entry) => ({ day: entry.day, text: entry.text, tone: entry.tone }) as (typeof data.journal)[number],
+    );
+    // Day 400 is the tenth day of the second month of the second year.
+    const restored = deserializeCity(data);
+    const entry = restored.journal.at(-1);
+    expect(entry?.year).toBe(25);
+    expect(entry?.month).toBe(2);
+    expect(entry?.dayOfMonth).toBe(11);
+    // And an undated entry is not shouted about as unread news.
+    expect(unreadJournalCount(restored)).toBe(0);
+  });
+
+  it('remembers which grievances were recently raised', () => {
+    const city = townAtPopulation(200);
+    city.clock.totalDays = 140;
+    city.complaints.water = 120;
+
+    const restored = deserializeCity(serializeCity(city));
+    expect(restored.complaints.water).toBe(120);
   });
 });
 
