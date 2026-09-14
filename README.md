@@ -141,6 +141,15 @@ dependencies:
 | Objects | Roads, buildings, walls, woodland and people, batched per chunk |
 | Water | A flat sheet whose movement is all in the normal, thinning out over the shallows |
 
+Where the browser is rasterising in software — a machine with no usable
+card, and every headless runner — the renderer notices and trades what it
+can: a shadow map a sixteenth of the size with a single tap instead of nine,
+the woodland thinned to one standard a tile at reduced detail and kept out
+of the shadow pass, one device pixel instead of four, and the fine octaves
+of ground grain dropped. Together those are about five times the frame rate,
+for a picture nobody would pick out of a line-up. On a card, none of it
+applies.
+
 Work is divided into chunks of sixteen tiles. Ground and water are built
 once; roads, buildings, walls and woodland are rebuilt only for the chunks
 the simulation has touched, and a frame may only spend so much on building,

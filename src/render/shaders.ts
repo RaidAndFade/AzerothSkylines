@@ -43,6 +43,12 @@ uniform vec3 uCameraPosition;
 uniform sampler2D uShadowMap;
 uniform float uShadowTexel;
 uniform vec4 uTint;
+/**
+ * 1 where the machine has a graphics card, 0 where it is rasterising in
+ * software. Every branch on it trades a little fidelity for a lot of fill,
+ * which is the only thing a software rasteriser is short of.
+ */
+uniform float uDetail;
 
 in vec3 vWorld;
 in vec3 vNormal;
@@ -57,6 +63,13 @@ float shadowFactor(vec3 normal) {
   if (coord.z > 1.0 || coord.x < 0.0 || coord.x > 1.0 || coord.y < 0.0 || coord.y > 1.0) return 1.0;
   float slope = clamp(1.0 - dot(normal, uSunDirection), 0.0, 1.0);
   float bias = 0.0016 + 0.0055 * slope;
+
+  // Nine taps per pixel is nothing on a graphics card and most of the frame
+  // without one, so software takes the single tap and the harder edge.
+  if (uDetail < 0.5) {
+    return coord.z - bias > texture(uShadowMap, coord.xy).r ? 0.0 : 1.0;
+  }
+
   float lit = 0.0;
   for (int y = -1; y <= 1; y++) {
     for (int x = -1; x <= 1; x++) {
@@ -152,10 +165,13 @@ uniform vec2 uMapSize;
 
 void main() {
   vec2 tile = vWorld.xz;
-  float grain =
-    valueNoise(tile * 1.7) * 0.5 +
-    valueNoise(tile * 5.3) * 0.3 +
-    valueNoise(tile * 17.0) * 0.2;
+  // The broad octave carries the turf; the fine two are what it is made of.
+  // Dropping them in software keeps the same mean, so the ground does not
+  // change colour — it only loses its close grain.
+  float grain = valueNoise(tile * 1.7) * 0.5;
+  grain += uDetail > 0.5
+    ? valueNoise(tile * 5.3) * 0.3 + valueNoise(tile * 17.0) * 0.2
+    : 0.25;
   vec3 albedo = vColor.rgb * (0.88 + grain * 0.24);
 
   vec4 decal = texture(uDecal, tile / uMapSize);
@@ -182,12 +198,15 @@ uniform float uTime;
 
 void main() {
   vec2 p = vWorld.xz;
+  float chop = uDetail > 0.5 ? 1.0 : 0.0;
   float wave =
     sin(p.x * 0.9 + uTime * 0.65) * 0.5 +
     sin((p.x * 0.4 - p.y * 0.7) + uTime * 0.9) * 0.35 +
-    valueNoise(p * 2.1 + vec2(uTime * 0.14, uTime * 0.09)) * 0.7;
-  float slopeX = cos(p.x * 0.9 + uTime * 0.65) * 0.028 + (valueNoise(p * 2.1 + vec2(uTime * 0.14, 0.0)) - 0.5) * 0.05;
-  float slopeZ = cos(p.y * 0.7 - uTime * 0.9) * 0.024 + (valueNoise(p * 1.7 - vec2(0.0, uTime * 0.11)) - 0.5) * 0.05;
+    chop * valueNoise(p * 2.1 + vec2(uTime * 0.14, uTime * 0.09)) * 0.7;
+  float slopeX = cos(p.x * 0.9 + uTime * 0.65) * 0.028
+    + chop * (valueNoise(p * 2.1 + vec2(uTime * 0.14, 0.0)) - 0.5) * 0.05;
+  float slopeZ = cos(p.y * 0.7 - uTime * 0.9) * 0.024
+    + chop * (valueNoise(p * 1.7 - vec2(0.0, uTime * 0.11)) - 0.5) * 0.05;
   vec3 normal = normalize(vec3(-slopeX, 1.0, -slopeZ));
 
   float depth = vColor.a;

@@ -152,6 +152,8 @@ export class Renderer {
   private shadowBuffer: WebGLFramebuffer | null = null;
   private shadowSize = 2048;
   private shadowRadius = 40;
+  /** True when there is no graphics card and every pixel is costing cycles. */
+  private readonly software: boolean;
   private readonly shadowMatrix: Mat4 = mat4();
   private readonly lightView: Mat4 = mat4();
   private readonly lightProjection: Mat4 = mat4();
@@ -170,6 +172,7 @@ export class Renderer {
     });
     if (!gl) throw new Error('This browser cannot show the valley: WebGL 2 is unavailable.');
     this.gl = gl;
+    this.software = isSoftwareRenderer(gl);
 
     this.groundProgram = createProgram(gl, OBJECT_VERTEX, GROUND_FRAGMENT);
     this.objectProgram = createProgram(gl, OBJECT_VERTEX, OBJECT_FRAGMENT);
@@ -186,8 +189,12 @@ export class Renderer {
   }
 
   resize(width: number, height: number, pixelRatio: number): void {
-    this.canvas.width = Math.max(1, Math.round(width * pixelRatio));
-    this.canvas.height = Math.max(1, Math.round(height * pixelRatio));
+    // A software rasteriser pays cycles for every pixel it fills, and a
+    // dense display asks it for four where one would do. Drawing at CSS
+    // resolution there is the difference between a game and a slideshow.
+    const ratio = this.software ? 1 : pixelRatio;
+    this.canvas.width = Math.max(1, Math.round(width * ratio));
+    this.canvas.height = Math.max(1, Math.round(height * ratio));
     this.canvas.style.width = `${width}px`;
     this.canvas.style.height = `${height}px`;
     this.camera.resize(width, height);
@@ -197,9 +204,11 @@ export class Renderer {
 
   private createShadowMap(): void {
     const gl = this.gl;
-    // Fall back to a smaller map on hardware that will not give us a large one.
+    // Four million depth pixels a frame is free on a graphics card and most
+    // of the frame without one, so a software rasteriser gets a sixteenth of
+    // the map and lives with a harder shadow edge.
     const limit = gl.getParameter(gl.MAX_TEXTURE_SIZE) as number;
-    this.shadowSize = Math.min(this.shadowSize, limit);
+    this.shadowSize = Math.min(this.software ? 512 : this.shadowSize, limit);
     const texture = gl.createTexture();
     const buffer = gl.createFramebuffer();
     if (!texture || !buffer) throw new Error('Could not allocate the shadow map');
@@ -335,9 +344,11 @@ export class Renderer {
       if (!this.nearShadowCaster(chunk)) continue;
       chunk.ground?.draw();
       chunk.structures?.draw();
-      chunk.nature?.draw();
+      // A wood is most of the vertices in a chunk, and its shadow is the
+      // least of what a shadow map is for. Without a card, it sits this out.
+      if (!this.software) chunk.nature?.draw();
     }
-    this.agentBatch?.draw();
+    if (!this.software) this.agentBatch?.draw();
     gl.cullFace(gl.BACK);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
 
@@ -407,6 +418,7 @@ export class Renderer {
     );
     gl.uniform1i(program.uniform('uShadowMap'), 0);
     gl.uniform1f(program.uniform('uShadowTexel'), 1 / this.shadowSize);
+    gl.uniform1f(program.uniform('uDetail'), this.software ? 0 : 1);
     gl.uniform4f(program.uniform('uTint'), 0, 0, 0, 0);
   }
 
@@ -514,7 +526,10 @@ export class Renderer {
         this.buildGround(city.map, chunk);
         budget -= cost;
       }
-      const detail = this.chunkDistance(chunk) < NEAR_WOOD;
+      // A wood is most of the triangles in the valley. Without a card, it is
+      // built at the reduced detail everywhere rather than only in the
+      // distance — the difference is a lobe or two per crown.
+      const detail = !this.software && this.chunkDistance(chunk) < NEAR_WOOD;
       if (chunk.inMap && (chunk.contentDirty || chunk.natureDetail !== detail)) {
         if (budget > 0) {
           this.buildContent(city, chunk, detail);
@@ -593,7 +608,14 @@ export class Renderer {
         const index = tileIndex(city, x, y);
         if (city.buildingAt[index] >= 0 || city.roads[index] !== RoadType.None) continue;
         if (city.wallAt[index] >= 0) continue;
-        for (const tree of standingTreesOnTile(city, x, y)) {
+        // A wood is thousands of instances, and on a software rasteriser it
+        // is most of the frame. Thinning it to one standard per tile keeps
+        // woodland everywhere it should be, at a third of the geometry; the
+        // ground under it is already tinted toward the canopy, so a thinner
+        // wood still reads as a wood.
+        const standing = standingTreesOnTile(city, x, y);
+        const trees = this.software && standing.length > 1 ? standing.slice(0, 1) : standing;
+        for (const tree of trees) {
           const wx = x + 0.5 + tree.ox;
           const wz = y + 0.5 + tree.oy;
           const yaw = hash2(x * 31 + tree.variant, y * 17, map.seed) * Math.PI * 2;
@@ -751,7 +773,14 @@ export class Renderer {
    * What the renderer is holding and drawing, for the console handle and the
    * frame-pacing tool.
    */
-  stats(): { chunks: number; built: number; drawn: number; frameMs: number } {
+  stats(): {
+    chunks: number;
+    built: number;
+    drawn: number;
+    frameMs: number;
+    software: boolean;
+    shadowSize: number;
+  } {
     let built = 0;
     for (const chunk of this.chunks) if (chunk.builtGround) built++;
     return {
@@ -759,6 +788,8 @@ export class Renderer {
       built,
       drawn: this.drawnChunks,
       frameMs: Math.round(this.frameTime * 100) / 100,
+      software: this.software,
+      shadowSize: this.shadowSize,
     };
   }
 
@@ -767,6 +798,28 @@ export class Renderer {
     const centre = buildingCenter(building);
     this.camera.centreOnTile(centre.x, centre.y);
   }
+}
+
+/**
+ * Whether the context is being rasterised in software. There is no direct
+ * way to ask, so this reads the renderer string the debug extension gives
+ * up: SwiftShader under Chromium, llvmpipe under Mesa, and Microsoft's
+ * Basic Render Driver are what a machine without a usable card reports.
+ */
+function isSoftwareRenderer(gl: WebGL2RenderingContext): boolean {
+  const debug = gl.getExtension('WEBGL_debug_renderer_info');
+  if (!debug) return false;
+  return rendersInSoftware(String(gl.getParameter(debug.UNMASKED_RENDERER_WEBGL) ?? ''));
+}
+
+/**
+ * Whether a renderer string names a software rasteriser. Kept apart from the
+ * context so it can be held to the strings real machines actually report —
+ * guessing wrong in one direction costs a card-owner nothing, and in the
+ * other leaves someone without a card at a slideshow.
+ */
+export function rendersInSoftware(renderer: string): boolean {
+  return /swiftshader|llvmpipe|softpipe|basic render|software/i.test(renderer);
 }
 
 /** A general 4x4 inverse, needed only for turning the sky back into rays. */

@@ -31,6 +31,7 @@ import {
   surfaceNormal,
   tileHeight,
 } from '@/sim/terrain';
+import { rendersInSoftware } from '@/render/renderer';
 import { addBuilding } from '@/render/buildingMesh';
 import { styleFor } from '@/data/styles';
 import { makeFlatCity } from './helpers';
@@ -331,6 +332,39 @@ describe('frustum culling', () => {
     expect(p.x / p.w).toBeCloseTo(0, 6);
     expect(p.y / p.w).toBeCloseTo(0, 6);
     expect(p.w).toBeGreaterThan(0);
+  });
+});
+
+describe('spotting a machine with no graphics card', () => {
+  it('knows the rasterisers a browser falls back to', () => {
+    for (const renderer of [
+      'ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero) (0x0000C0DE)), SwiftShader driver)',
+      'Mesa/X.org, llvmpipe (LLVM 15.0.7, 256 bits)',
+      'Google SwiftShader',
+      'Microsoft Basic Render Driver',
+      'softpipe',
+    ]) {
+      expect(rendersInSoftware(renderer), renderer).toBe(true);
+    }
+  });
+
+  it('leaves a real card alone', () => {
+    for (const renderer of [
+      'ANGLE (NVIDIA, NVIDIA GeForce RTX 4070 Direct3D11 vs_5_0 ps_5_0, D3D11)',
+      'ANGLE (Apple, ANGLE Metal Renderer: Apple M2, Unspecified Version)',
+      'ANGLE (Intel, Intel(R) UHD Graphics 620 Direct3D11 vs_5_0 ps_5_0, D3D11)',
+      'Adreno (TM) 730',
+      'Mali-G78',
+    ]) {
+      expect(rendersInSoftware(renderer), renderer).toBe(false);
+    }
+  });
+
+  it('takes an unknown or empty string as a card, since that is the safer guess', () => {
+    // A browser that will not name its renderer is far more likely to be
+    // hiding a real one than to be rasterising in software.
+    expect(rendersInSoftware('')).toBe(false);
+    expect(rendersInSoftware('WebKit WebGL')).toBe(false);
   });
 });
 
